@@ -58,6 +58,159 @@ const API_COHERE_V2 = 'https://api.cohere.ai/v2';
 const API_PERPLEXITY = 'https://api.perplexity.ai';
 const API_GROQ = 'https://api.groq.com/openai/v1';
 const API_MAKERSUITE = 'https://generativelanguage.googleapis.com';
+
+// --- First-Anchor Context Reconstruction (global matching) ---
+// Transparent, optional pre-processing to preserve cache hits under limited context.
+// Controlled by config: claude.firstAnchorCaching.enabled / ttlSeconds
+const FIRST_ANCHOR_STORE = [];
+
+const removeEphemeralFields = (obj) => {
+    if (!obj || typeof obj !== 'object') return obj;
+    // Shallow copy then strip known ephemeral keys
+    const copy = Array.isArray(obj) ? obj.map(removeEphemeralFields) : { ...obj };
+    if (!Array.isArray(copy)) {
+        delete copy.cache_control;
+        delete copy.id; // ignore any transient ids
+    }
+    if (Array.isArray(copy)) return copy;
+    for (const k of Object.keys(copy)) {
+        const v = copy[k];
+        if (v && typeof v === 'object') copy[k] = removeEphemeralFields(v);
+    }
+    return copy;
+};
+
+const normalizeContentArray = (content) => {
+    if (typeof content === 'string') {
+        return [{ type: 'text', text: content }];
+    }
+    if (Array.isArray(content)) {
+        return content.map((part) => {
+            if (typeof part === 'string') return { type: 'text', text: part };
+            return removeEphemeralFields(part);
+        });
+    }
+    return [];
+};
+
+const fingerprintMessage = (msg) => {
+    const norm = {
+        role: msg.role,
+        content: normalizeContentArray(msg.content),
+    };
+    return JSON.stringify(norm);
+};
+
+const getTextPreview = (msg, max = 80) => {
+    try {
+        let text = '';
+        if (typeof msg?.content === 'string') {
+            text = msg.content;
+        } else if (Array.isArray(msg?.content)) {
+            const textPart = msg.content.find(p => p && p.type === 'text');
+            text = textPart?.text ?? '';
+        }
+        return String(text).replace(/\s+/g, ' ').trim().slice(0, max);
+    } catch {
+        return '';
+    }
+};
+
+const msgPreview = (msg) => `${msg?.role ?? '?'}: "${getTextPreview(msg)}"`;
+
+const purgeExpiredFirstAnchor = () => {
+    const now = Date.now();
+    let purged = 0;
+    for (let i = FIRST_ANCHOR_STORE.length - 1; i >= 0; i--) {
+        if (FIRST_ANCHOR_STORE[i].expireAt <= now) { FIRST_ANCHOR_STORE.splice(i, 1); purged++; }
+    }
+    return purged;
+};
+
+const longestRightEndedOverlap = (a, b) => {
+    const maxK = Math.min(a.length, b.length);
+    for (let k = maxK; k > 0; k--) {
+        let match = true;
+        for (let i = 0; i < k; i++) {
+            if (a[a.length - k + i] !== b[i]) { match = false; break; }
+        }
+        if (match) return k;
+    }
+    return 0;
+};
+
+function applyFirstAnchorReconstruction(request) {
+    try {
+        const enabled = getConfigValue('claude.firstAnchorCaching.enabled', false, 'boolean');
+        if (!enabled) return;
+        if (!Array.isArray(request.body?.messages) || request.body.messages.length === 0) return;
+
+        // Split leading system block
+        const sys = [];
+        let i = 0;
+        while (i < request.body.messages.length && request.body.messages[i]?.role === 'system') {
+            sys.push(request.body.messages[i]);
+            i++;
+        }
+        const windowMsgs = request.body.messages.slice(i);
+        if (windowMsgs.length === 0) return; // nothing to reconstruct
+
+        // Build fingerprints for current window
+        const windowFP = windowMsgs.map(fingerprintMessage);
+
+        // TTL
+        const ttlSec = getConfigValue('claude.firstAnchorCaching.ttlSeconds', 3600, 'number');
+        const ttlMs = Math.max(0, Number.isFinite(ttlSec) ? ttlSec * 1000 : 3600000);
+
+        purgeExpiredFirstAnchor();
+
+        // Find best match globally (max right-ended overlap)
+        let best = null;
+        let bestK = 0;
+        for (const entry of FIRST_ANCHOR_STORE) {
+            const k = longestRightEndedOverlap(entry.fps, windowFP);
+            if (k > bestK) { bestK = k; best = entry; }
+        }
+
+        if (best && bestK > 0) {
+            // Extend lynchpin with new right tail
+            const tailMsgs = windowMsgs.slice(bestK);
+            const tailFPs = windowFP.slice(bestK);
+            if (tailMsgs.length > 0) {
+                // Logging: show before/after previews
+                const beforePrev = best.msgs.length ? `${msgPreview(best.msgs.at(-1))}` : '(empty)';
+                const tailPrev = `${msgPreview(tailMsgs[0])}`;
+                console.log('[FirstAnchor] Lynchpin hit. Overlap size:', bestK, '| last lynchpin:', beforePrev, '| incoming head:', tailPrev);
+
+                best.msgs.push(...tailMsgs);
+                best.fps.push(...tailFPs);
+
+                const afterPrev = `${msgPreview(best.msgs.at(-1))}`;
+                console.log('[FirstAnchor] Lynchpin extended. New tail head:', tailPrev, '| new last lynchpin:', afterPrev, '| total len:', best.msgs.length);
+            } else {
+                console.log('[FirstAnchor] Lynchpin hit with zero extension (perfect match).');
+            }
+            best.expireAt = Date.now() + ttlMs; // refresh TTL
+
+            // Rebuild full context: system + lynchpin
+            request.body.messages = [...sys, ...best.msgs];
+            const sysPrev = sys.length ? `${msgPreview(sys.at(-1))}` : '(no system)';
+            console.log('[FirstAnchor] Reconstructed context applied. System last:', sysPrev, '| Lynchpin len:', best.msgs.length);
+            return; // all or nothing
+        }
+
+        // No match found -> seed a new lynchpin from current window, but do not modify request
+        const seedHead = windowMsgs[0] ? msgPreview(windowMsgs[0]) : '(empty)';
+        const seedTail = windowMsgs.at(-1) ? msgPreview(windowMsgs.at(-1)) : '(empty)';
+        console.log('[FirstAnchor] No match found. Seeding new lynchpin. Head:', seedHead, '| Tail:', seedTail, '| Len:', windowMsgs.length);
+        FIRST_ANCHOR_STORE.push({ msgs: windowMsgs.slice(), fps: windowFP.slice(), expireAt: Date.now() + ttlMs });
+    } catch (e) {
+        console.warn('FirstAnchor reconstruction failed:', e);
+        // Fail open: do nothing
+    }
+}
+// --- End First-Anchor Context Reconstruction ---
+
 const API_VERTEX_AI = 'https://us-central1-aiplatform.googleapis.com';
 const API_AI21 = 'https://api.ai21.com/studio/v1';
 const API_NANOGPT = 'https://nano-gpt.com/api/v1';
@@ -1463,6 +1616,10 @@ router.post('/bias', async function (request, response) {
 router.post('/generate', function (request, response) {
     if (!request.body) return response.status(400).send({ error: true });
 
+
+	    // Optional transparent reconstruction to preserve cache hits under limited context
+	    applyFirstAnchorReconstruction(request);
+
     const postProcessingType = request.body.custom_prompt_post_processing;
     if (Array.isArray(request.body.messages) && postProcessingType) {
         console.info('Applying custom prompt post-processing of type', postProcessingType);
@@ -1572,7 +1729,7 @@ router.post('/generate', function (request, response) {
         const enableSystemPromptCache = getConfigValue('claude.enableSystemPromptCache', false, 'boolean');
         if (enableSystemPromptCache && isClaude3or4 && Array.isArray(request.body.messages) && request.body.messages.length) {
             console.log(`System prompt caching enabled for Claude model: ${request.body.model}`);
-            
+
             // Tag the last system message in the leading system segment (before the first non-system)
             let leadingSystemCount = 0;
             for (let i = 0; i < request.body.messages.length; i++) {
@@ -1595,17 +1752,17 @@ router.post('/generate', function (request, response) {
                 if (typeof sysMsg.content === 'string') {
                     const truncatedText = sysMsg.content.slice(0, 50) + (sysMsg.content.length > 50 ? '...' : '');
                     console.log(`Converting string content to array format - (${truncatedText})`);
-                    
+
                     sysMsg.content = [{
                         type: 'text',
                         text: sysMsg.content,
                         cache_control: { type: 'ephemeral', ttl: cacheTTL },
                     }];
-                    
+
                     console.log(`System cache breakpoint is at ${tagIndex} - (${truncatedText})`);
                 } else if (Array.isArray(sysMsg.content) && sysMsg.content.length) {
                     console.log(`System message content is already array format with ${sysMsg.content.length} parts`);
-                    
+
                     // Prefer tagging the last text block if present, otherwise tag the last part
                     let partIndex = -1;
                     for (let j = sysMsg.content.length - 1; j >= 0; j--) {
@@ -1615,12 +1772,12 @@ router.post('/generate', function (request, response) {
                         }
                     }
                     const idx = partIndex !== -1 ? partIndex : sysMsg.content.length - 1;
-                    
+
                     console.log(`Tagging content part at index ${idx} (${partIndex !== -1 ? 'text block' : 'last part'})`);
-                    
+
                     sysMsg.content[idx].cache_control = { type: 'ephemeral', ttl: cacheTTL };
 
-                    const truncatedText = sysMsg.content[idx].text ? 
+                    const truncatedText = sysMsg.content[idx].text ?
                         sysMsg.content[idx].text.slice(0, 50) + (sysMsg.content[idx].text.length > 50 ? '...' : '') :
                         '[non-text content]';
 
