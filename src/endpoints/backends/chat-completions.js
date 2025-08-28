@@ -2018,7 +2018,7 @@ router.post('/generate', function (request, response) {
         signal: controller.signal,
     };
 
-    console.debug(requestBody);
+    // console.debug(requestBody);
 
     makeRequest(config, response, request);
 
