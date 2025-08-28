@@ -2360,6 +2360,9 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
 
     await eventSource.emit(event_types.CHAT_COMPLETION_SETTINGS_READY, generate_data);
 
+    // Debug: log what we're about to send
+    console.debug(`[Costs][debug] About to send: source=${oai_settings.chat_completion_source} stream=${stream} model=${generate_data.model}`);
+
     const generate_url = '/api/backends/chat-completions/generate';
     const response = await fetch(generate_url, {
         method: 'POST',
