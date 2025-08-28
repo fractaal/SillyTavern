@@ -189,16 +189,18 @@ function applyFirstAnchorReconstruction(request) {
             const tailMsgs = windowMsgs.slice(bestK);
             const tailFPs = windowFP.slice(bestK);
             if (tailMsgs.length > 0) {
-                // Logging: show before/after previews
-                const beforePrev = best.msgs.length ? `${msgPreview(best.msgs.at(-1))}` : '(empty)';
-                const tailPrev = `${msgPreview(tailMsgs[0])}`;
-                console.log('[FirstAnchor] Lynchpin hit. Overlap size:', bestK, '| last lynchpin:', beforePrev, '| incoming head:', tailPrev);
+                // Logging: narrate tail movement for clarity
+                const prevTail = best.msgs.length ? `${msgPreview(best.msgs.at(-1))}` : '(empty)';
+                const incomingHead = `${msgPreview(tailMsgs[0])}`;
+                console.log('[FirstAnchor] Lynchpin match. Overlap=', bestK);
+                console.log('[FirstAnchor] PrevTail:', prevTail);
+                console.log('[FirstAnchor] ExtendStart:', incomingHead);
 
                 best.msgs.push(...tailMsgs);
                 best.fps.push(...tailFPs);
 
-                const afterPrev = `${msgPreview(best.msgs.at(-1))}`;
-                console.log('[FirstAnchor] Lynchpin extended. New tail head:', tailPrev, '| new last lynchpin:', afterPrev, '| total len:', best.msgs.length);
+                const newTail = `${msgPreview(best.msgs.at(-1))}`;
+                console.log('[FirstAnchor] Fast-forward -> NewTail:', newTail, '| ExtendCount=', tailMsgs.length, '| LynchpinLen=', best.msgs.length);
             } else {
                 console.log('[FirstAnchor] Lynchpin hit with zero extension (perfect match).');
             }
@@ -212,9 +214,9 @@ function applyFirstAnchorReconstruction(request) {
         }
 
         // No match found -> seed a new lynchpin from current window, but do not modify request
-        const seedHead = windowMsgs[0] ? msgPreview(windowMsgs[0]) : '(empty)';
-        const seedTail = windowMsgs.at(-1) ? msgPreview(windowMsgs.at(-1)) : '(empty)';
-        console.log('[FirstAnchor] No match found. Seeding new lynchpin. Head:', seedHead, '| Tail:', seedTail, '| Len:', windowMsgs.length);
+        const latestTail = windowMsgs.length ? msgPreview(windowMsgs.at(-1)) : '(empty window)';
+        console.log('[FirstAnchor] Tail(latest):', latestTail);
+        console.log('[FirstAnchor] No lynchpin. Seeded. WindowLen=', windowMsgs.length);
         FIRST_ANCHOR_STORE.push({ msgs: windowMsgs.slice(), fps: windowFP.slice(), expireAt: Date.now() + ttlMs });
     } catch (e) {
         console.warn('FirstAnchor reconstruction failed:', e);
