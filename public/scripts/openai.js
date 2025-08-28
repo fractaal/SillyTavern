@@ -2381,6 +2381,7 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
             const swipes = [];
             const toolCalls = [];
             const state = { reasoning: '', image: '' };
+            let postedUsage = false;
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) return;
@@ -2388,6 +2389,19 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
                 if (rawData === '[DONE]') return;
                 tryParseStreamingError(response, rawData);
                 const parsed = JSON.parse(rawData);
+
+                // OpenRouter usage accounting for streaming (final chunk carries usage when stream_options.include_usage=true)
+                if (!postedUsage && oai_settings.chat_completion_source === chat_completion_sources.OPENROUTER && parsed?.usage) {
+                    const u = parsed.usage;
+                    const prompt = Number(u.prompt_tokens || 0);
+                    const completion = Number(u.completion_tokens || 0);
+                    const base = (3e-6 * prompt) + (15e-6 * completion);
+                    const actual = Number(u.cost || 0);
+                    const saved = base - actual;
+                    postedUsage = true;
+                    console.info(`[Costs][stream] base=$${base.toFixed(6)} actual=$${actual.toFixed(6)} saved=$${saved.toFixed(6)} (p=${prompt}, c=${completion})`);
+                    try { await fetch('/api/costs/add', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ base, actual }) }); } catch (e) { console.warn('Failed to add costs', e); }
+                }
 
                 if (Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
                     const swipeIndex = parsed.choices[0].index - 1;
@@ -2413,6 +2427,18 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
             const message = data.error.message || response.statusText || t`Unknown error`;
             toastr.error(message, t`API returned an error`);
             throw new Error(message);
+        }
+
+        // OpenRouter usage accounting for non-streaming
+        if (oai_settings.chat_completion_source === chat_completion_sources.OPENROUTER && data?.usage) {
+            const u = data.usage;
+            const prompt = Number(u.prompt_tokens || 0);
+            const completion = Number(u.completion_tokens || 0);
+            const base = (3e-6 * prompt) + (15e-6 * completion);
+            const actual = Number(u.cost || 0);
+            const saved = base - actual;
+            console.info(`[Costs][non-stream] base=$${base.toFixed(6)} actual=$${actual.toFixed(6)} saved=$${saved.toFixed(6)} (p=${prompt}, c=${completion})`);
+            try { await fetch('/api/costs/add', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ base, actual }) }); } catch (e) { console.warn('Failed to add costs', e); }
         }
 
         if (type !== 'quiet') {

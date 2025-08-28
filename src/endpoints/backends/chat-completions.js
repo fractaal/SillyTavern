@@ -1777,6 +1777,11 @@ router.post('/generate', function (request, response) {
             'include_reasoning': Boolean(request.body.include_reasoning),
         };
 
+        // Ensure OpenRouter streams include usage in the final event
+        if (request.body.stream) {
+            bodyParams['stream_options'] = { include_usage: true };
+        }
+
         if (request.body.min_p !== undefined) {
             bodyParams['min_p'] = request.body.min_p;
         }
@@ -2106,7 +2111,7 @@ router.post('/generate', function (request, response) {
     // Compact, formatted context preview for quick verification
     try {
         if (true) {
-            const previewLen = 120;
+            const previewLen = 15;
             const hasCacheBreakpoint = (/** @type {any} */ msg) => {
                 if (msg && typeof msg === 'object' && msg.cache_control) return true;
                 const c = msg?.content;
@@ -2122,9 +2127,9 @@ router.post('/generate', function (request, response) {
                 logLines.push('Sent prompt: ' + quote(requestBody.prompt ?? ''));
             } else if (Array.isArray(requestBody.messages)) {
                 const msgs = requestBody.messages;
-                const keepTotal = 12; // show first 6 and last 6 if large
-                const headCount = 6;
-                const tailCount = 6;
+                const keepTotal = 24; // show first 6 and last 6 if large
+                const headCount = 12;
+                const tailCount = 12;
                 const useFold = msgs.length > keepTotal;
                 const toShow = useFold ? [...msgs.slice(0, headCount), '…', ...msgs.slice(-tailCount)] : msgs;
                 logLines.push('Sent context:');
@@ -2141,7 +2146,7 @@ router.post('/generate', function (request, response) {
                         if (m.content.type === 'text' && m.content.text) text = m.content.text;
                     }
                     const marker = hasCacheBreakpoint(m) ? ' (📦 cache breakpoint)' : '';
-                    logLines.push(`(${role}) ${quote(text)}${marker}`);
+                    logLines.push(`(${role})\t${quote(text)}${marker}`);
                 }
             }
             if (logLines.length) {
