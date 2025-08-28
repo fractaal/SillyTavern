@@ -139,6 +139,33 @@ const longestRightEndedOverlap = (a, b) => {
     return 0;
 };
 
+const findLongestPrefixMatch = (big, small) => {
+    // Returns { startIndex, length } where small[0..length-1] matches big[start..start+length-1]
+    if (!Array.isArray(big) || !Array.isArray(small) || small.length === 0) return { startIndex: -1, length: 0 };
+    let best = { startIndex: -1, length: 0 };
+    for (let s = 0; s < big.length; s++) {
+        let len = 0;
+        while (s + len < big.length && len < small.length && big[s + len] === small[len]) {
+            len++;
+        }
+        if (len > best.length) best = { startIndex: s, length: len };
+        if (best.length === small.length) break; // perfect
+    }
+    return best;
+};
+
+const indexOfSubsequence = (big, small) => {
+    if (!Array.isArray(big) || !Array.isArray(small) || small.length === 0 || small.length > big.length) return -1;
+    outer: for (let i = 0; i <= big.length - small.length; i++) {
+        for (let j = 0; j < small.length; j++) {
+            if (big[i + j] !== small[j]) continue outer;
+        }
+        return i;
+    }
+    return -1;
+};
+
+
 function applyFirstAnchorReconstruction(request) {
     try {
         const enabled = getConfigValue('claude.firstAnchorCaching.enabled', false, 'boolean');
@@ -152,7 +179,7 @@ function applyFirstAnchorReconstruction(request) {
             sys.push(request.body.messages[i]);
             i++;
         }
-        
+
         console.log("\n\n");
 
         // Trim trailing floating system messages (common for reminders)
@@ -209,10 +236,64 @@ function applyFirstAnchorReconstruction(request) {
             best.expireAt = Date.now() + ttlMs; // refresh TTL
 
             // Rebuild full context: system + lynchpin
-            request.body.messages = [...sys, ...best.msgs];
+            request.body.messages = [...sys, ...best.msgs, ...trailingSys];
             const sysPrev = sys.length ? `${msgPreview(sys.at(-1))}` : '(no system)';
             console.log('[FirstAnchor] Reconstructed context applied. System last:', sysPrev, '| Lynchpin len:', best.msgs.length);
             return; // all or nothing
+        }
+
+        // No right-ended overlap: try rewind if enabled and we can find a contiguous subsequence match
+        const allowRewind = getConfigValue('claude.firstAnchorCaching.allowRewind', true, 'boolean');
+        if (allowRewind && best?.fps?.length) {
+            const s = indexOfSubsequence(best.fps, windowFP);
+            if (s !== -1) {
+                const e = s + windowFP.length - 1;
+                const prevTail = best.msgs.length ? `${msgPreview(best.msgs.at(-1))}` : '(empty)';
+                const newTail = `${msgPreview(best.msgs[e])}`;
+                const cutCount = Math.max(0, best.msgs.length - (e + 1));
+                const prevIndex = best.msgs.length - 1;
+                const rewindToIdx = e;
+                const jumpBack = Math.max(0, prevIndex - rewindToIdx);
+                console.log('[FirstAnchor] Rewind detected. Jumping back', jumpBack, 'steps to:', newTail);
+                console.log(`[FirstAnchor] PrevTail (index ${prevIndex}):`, prevTail);
+                console.log(`[FirstAnchor] PrevTail (rewind to ${prevIndex - jumpBack}):`, newTail);
+                console.log('[FirstAnchor] CutCount=', cutCount, '| LynchpinLen=', e + 1);
+
+                best.msgs = best.msgs.slice(0, e + 1);
+                best.fps = best.fps.slice(0, e + 1);
+                best.expireAt = Date.now() + ttlMs;
+
+                request.body.messages = [...sys, ...best.msgs, ...trailingSys];
+                console.log('[FirstAnchor] Reconstructed context applied after rewind. Tail is now at:', newTail);
+                return;
+            }
+        }
+
+        // Rewind + edit: allow prefix match of the window against the lynchpin when only the tail differs
+        if (allowRewind && best?.fps?.length) {
+            const windowLen = windowFP.length;
+            if (windowLen >= 2) {
+                const pref = findLongestPrefixMatch(best.fps, windowFP);
+                const appendedCount = windowLen - pref.length;
+                if (pref.startIndex !== -1 && pref.length >= windowLen - 1 && appendedCount > 0) {
+                    const cutTo = pref.startIndex + pref.length - 1;
+                    const prevTail = best.msgs.length ? `${msgPreview(best.msgs.at(-1))}` : '(empty)';
+                    const newTailMsgObj = windowMsgs[windowLen - 1];
+                    const newTail = `${msgPreview(newTailMsgObj)}`;
+                    const cutCount2 = Math.max(0, best.msgs.length - (cutTo + 1));
+                    console.log('[FirstAnchor] Rewind + edit detected. Prefix match=', pref.length);
+                    console.log(`[FirstAnchor] PrevTail (index ${best.msgs.length - 1}):`, prevTail);
+                    console.log(`[FirstAnchor] Cut to index ${cutTo}, append edited messages:`, appendedCount);
+
+                    best.msgs = best.msgs.slice(0, cutTo + 1).concat(windowMsgs.slice(pref.length));
+                    best.fps = best.fps.slice(0, cutTo + 1).concat(windowFP.slice(pref.length));
+                    best.expireAt = Date.now() + ttlMs;
+
+                    request.body.messages = [...sys, ...best.msgs, ...trailingSys];
+                    console.log('[FirstAnchor] Reconstructed context applied after rewind+edit. NewTail:', newTail, '| LynchpinLen=', best.msgs.length);
+                    return;
+                }
+            }
         }
 
         // No match found -> seed a new lynchpin from current window, but do not modify request
