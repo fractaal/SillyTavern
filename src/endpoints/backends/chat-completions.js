@@ -2103,7 +2103,54 @@ router.post('/generate', function (request, response) {
         signal: controller.signal,
     };
 
-    // console.debug(requestBody);
+    // Compact, formatted context preview for quick verification
+    try {
+        if (true) {
+            const previewLen = 120;
+            const hasCacheBreakpoint = (/** @type {any} */ msg) => {
+                if (msg && typeof msg === 'object' && msg.cache_control) return true;
+                const c = msg?.content;
+                if (Array.isArray(c)) {
+                    return c.some(p => p && typeof p === 'object' && p.cache_control);
+                }
+                return false;
+            };
+            const quote = (s) => `"${String(s).replace(/\s+/g, ' ').trim().slice(0, previewLen)}"`;
+
+            let logLines = [];
+            if (isTextCompletion) {
+                logLines.push('Sent prompt: ' + quote(requestBody.prompt ?? ''));
+            } else if (Array.isArray(requestBody.messages)) {
+                const msgs = requestBody.messages;
+                const keepTotal = 12; // show first 6 and last 6 if large
+                const headCount = 6;
+                const tailCount = 6;
+                const useFold = msgs.length > keepTotal;
+                const toShow = useFold ? [...msgs.slice(0, headCount), '…', ...msgs.slice(-tailCount)] : msgs;
+                logLines.push('Sent context:');
+                for (const m of toShow) {
+                    if (m === '…') { logLines.push('...'); continue; }
+                    const role = m.role ?? '?';
+                    let text = '';
+                    if (typeof m.content === 'string') {
+                        text = m.content;
+                    } else if (Array.isArray(m.content)) {
+                        const textPart = m.content.find(p => p && (p.type === 'text' || p.type === 'input_text'));
+                        text = textPart?.text ?? '';
+                    } else if (typeof m.content === 'object' && m.content !== null) {
+                        if (m.content.type === 'text' && m.content.text) text = m.content.text;
+                    }
+                    const marker = hasCacheBreakpoint(m) ? ' (📦 cache breakpoint)' : '';
+                    logLines.push(`(${role}) ${quote(text)}${marker}`);
+                }
+            }
+            if (logLines.length) {
+                console.debug(logLines.join('\n'));
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to format context preview:', e);
+    }
 
     makeRequest(config, response, request);
 
