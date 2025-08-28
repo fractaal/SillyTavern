@@ -1712,8 +1712,8 @@ function updateOpenRouterEconomicsPanel({ model, base = null, actual = null, sav
     if (model) {
         $('#or_econ_model').text(model.name || model.id || '—');
         // OpenRouter pricing is USD per token; display per 1K
-        const inUSDPerK = Number(model.pricing?.prompt || 0) * 1000;
-        const outUSDPerK = Number(model.pricing?.completion || 0) * 1000;
+        const inUSDPerK = Number(model.pricing?.prompt || 0) * 1000000;
+        const outUSDPerK = Number(model.pricing?.completion || 0) * 1000000;
         $('#or_econ_price_in').text(isFinite(inUSDPerK) ? inUSDPerK.toFixed(4) : '—');
         $('#or_econ_price_out').text(isFinite(outUSDPerK) ? outUSDPerK.toFixed(4) : '—');
         $('#or_econ_ctx').text(model.context_length || '—');
