@@ -2127,12 +2127,12 @@ router.post('/generate', function (request, response) {
                 logLines.push('Sent prompt: ' + quote(requestBody.prompt ?? ''));
             } else if (Array.isArray(requestBody.messages)) {
                 const msgs = requestBody.messages;
-                const keepTotal = 24; // show first 6 and last 6 if large
+                const keepTotal = 24; // show first 12 and last 12 if large
                 const headCount = 12;
                 const tailCount = 12;
                 const useFold = msgs.length > keepTotal;
                 const toShow = useFold ? [...msgs.slice(0, headCount), '…', ...msgs.slice(-tailCount)] : msgs;
-                logLines.push('Sent context:');
+                logLines.push(`Sent context (${msgs.length} total messages):`);
                 for (const m of toShow) {
                     if (m === '…') { logLines.push('...'); continue; }
                     const role = m.role ?? '?';
