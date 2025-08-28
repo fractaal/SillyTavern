@@ -1568,6 +1568,77 @@ router.post('/generate', function (request, response) {
             cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth, cacheTTL);
         }
 
+        // Apply system prompt caching for Claude via OpenRouter when enabled in config
+        const enableSystemPromptCache = getConfigValue('claude.enableSystemPromptCache', false, 'boolean');
+        if (enableSystemPromptCache && isClaude3or4 && Array.isArray(request.body.messages) && request.body.messages.length) {
+            console.log(`System prompt caching enabled for Claude model: ${request.body.model}`);
+            
+            // Tag the last system message in the leading system segment (before the first non-system)
+            let leadingSystemCount = 0;
+            for (let i = 0; i < request.body.messages.length; i++) {
+                const msg = request.body.messages[i];
+                if (msg && msg.role === 'system') {
+                    leadingSystemCount++;
+                    continue;
+                }
+                break;
+            }
+
+            console.log(`Found ${leadingSystemCount} leading system messages`);
+
+            if (leadingSystemCount > 0) {
+                const tagIndex = leadingSystemCount - 1;
+                const sysMsg = request.body.messages[tagIndex];
+
+                console.log(`Tagging system message at index ${tagIndex} for caching`);
+
+                if (typeof sysMsg.content === 'string') {
+                    const truncatedText = sysMsg.content.slice(0, 50) + (sysMsg.content.length > 50 ? '...' : '');
+                    console.log(`Converting string content to array format - (${truncatedText})`);
+                    
+                    sysMsg.content = [{
+                        type: 'text',
+                        text: sysMsg.content,
+                        cache_control: { type: 'ephemeral', ttl: cacheTTL },
+                    }];
+                    
+                    console.log(`System cache breakpoint is at ${tagIndex} - (${truncatedText})`);
+                } else if (Array.isArray(sysMsg.content) && sysMsg.content.length) {
+                    console.log(`System message content is already array format with ${sysMsg.content.length} parts`);
+                    
+                    // Prefer tagging the last text block if present, otherwise tag the last part
+                    let partIndex = -1;
+                    for (let j = sysMsg.content.length - 1; j >= 0; j--) {
+                        if (sysMsg.content[j] && sysMsg.content[j].type === 'text') {
+                            partIndex = j;
+                            break;
+                        }
+                    }
+                    const idx = partIndex !== -1 ? partIndex : sysMsg.content.length - 1;
+                    
+                    console.log(`Tagging content part at index ${idx} (${partIndex !== -1 ? 'text block' : 'last part'})`);
+                    
+                    sysMsg.content[idx].cache_control = { type: 'ephemeral', ttl: cacheTTL };
+
+                    const truncatedText = sysMsg.content[idx].text ? 
+                        sysMsg.content[idx].text.slice(0, 50) + (sysMsg.content[idx].text.length > 50 ? '...' : '') :
+                        '[non-text content]';
+
+                    console.log(`System cache breakpoint is at ${tagIndex} - (${truncatedText})`);
+                }
+            } else {
+                console.log('No leading system messages found for caching');
+            }
+        } else {
+            if (!enableSystemPromptCache) {
+                console.log('System prompt caching is disabled in config');
+            } else if (!isClaude3or4) {
+                console.log('System prompt caching not applied - not a Claude 3/4 model');
+            } else {
+                console.log('System prompt caching not applied - no messages found');
+            }
+        }
+
         const isGemini = /google\/gemini/.test(request.body.model);
         if (isGemini) {
             bodyParams['safety_settings'] = GEMINI_SAFETY;
