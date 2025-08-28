@@ -152,8 +152,20 @@ function applyFirstAnchorReconstruction(request) {
             sys.push(request.body.messages[i]);
             i++;
         }
-        const windowMsgs = request.body.messages.slice(i);
-        if (windowMsgs.length === 0) return; // nothing to reconstruct
+
+        // Trim trailing floating system messages (common for reminders)
+        const remainder = request.body.messages.slice(i);
+        if (remainder.length === 0) return; // nothing to reconstruct
+        let endNonSys = remainder.length - 1;
+        while (endNonSys >= 0 && remainder[endNonSys]?.role === 'system') endNonSys--;
+        const trailingSys = endNonSys < remainder.length - 1 ? remainder.slice(endNonSys + 1) : [];
+        const windowMsgs = remainder.slice(0, endNonSys + 1);
+        if (trailingSys.length > 0) {
+            const tailPrev = msgPreview(trailingSys.at(-1));
+            const windowTailNow = windowMsgs.length ? `${msgPreview(windowMsgs.at(-1))}` : '(empty window)';
+            console.log('[FirstAnchor] Trimmed trailing system messages:', trailingSys.length, '| last trailing sys:', tailPrev, '| window tail is now at:', windowTailNow);
+        }
+        if (windowMsgs.length === 0) return; // nothing to reconstruct after trimming
 
         // Build fingerprints for current window
         const windowFP = windowMsgs.map(fingerprintMessage);
