@@ -3084,6 +3084,7 @@
                                         <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
                                     </div>
                                     <div class="inline-drawer-content m-b-1">
+
                                         <div class="marginTopBot5">
                                             <label for="openrouter_sort_models" class="checkbox_label">
                                                 <select id="openrouter_sort_models">
@@ -3107,6 +3108,59 @@
                                     </div>
                                 </div>
                             </div>
+
+                            <!-- OpenRouter Economics Panel -->
+                            <div id="openrouter_econ_panel" class="range-block" data-source="openrouter">
+                                <div class="range-block-title">OpenRouter Economics</div>
+                                <div class="flex-container flexFlowRow wrap gap10">
+                                    <div>
+                                        <small>Model:</small>
+                                        <div id="or_econ_model">&ndash;</div>
+                                    </div>
+                                    <div>
+                                        <small>Pricing (per 1K):</small>
+                                        <div><span>In: $</span><span id="or_econ_price_in">&ndash;</span> <span>| Out: $</span><span id="or_econ_price_out">&ndash;</span></div>
+                                    </div>
+                                    <div>
+                                        <small>Context:</small>
+                                        <div id="or_econ_ctx">&ndash;</div>
+                                    </div>
+                                </div>
+                                <hr>
+                                <div class="flex-container flexFlowRow wrap gap10">
+                                    <div>
+                                        <small>Last Base:</small>
+                                        <div id="or_econ_last_base">&ndash;</div>
+                                    </div>
+                                    <div>
+                                        <small>Last Actual:</small>
+                                        <div id="or_econ_last_actual">&ndash;</div>
+                                    </div>
+                                    <div>
+                                        <small>Last Saved/Lost:</small>
+                                        <div id="or_econ_last_saved">&ndash;</div>
+                                    </div>
+                                </div>
+                                <hr>
+                                <div class="flex-container flexFlowRow wrap gap10">
+                                    <div>
+                                        <small>Total Base:</small>
+                                        <div id="or_econ_total_base">&ndash;</div>
+                                    </div>
+                                    <div>
+                                        <small>Total Actual:</small>
+                                        <div id="or_econ_total_actual">&ndash;</div>
+                                    </div>
+                                    <div>
+                                        <small>Total Saved/Lost:</small>
+                                        <div id="or_econ_total_saved">&ndash;</div>
+                                    </div>
+                                    <div>
+                                        <button id="or_econ_reset" class="menu_button menu_button_icon">Reset</button>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div>
                                 <h4 data-i18n="Model Providers">Model Providers</h4>
                                 <select id="openrouter_providers_chat" class="openrouter_providers" multiple>

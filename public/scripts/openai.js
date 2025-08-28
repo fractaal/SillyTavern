@@ -1682,7 +1682,65 @@ function calculateOpenRouterCost() {
     }
 
     $('#openrouter_max_prompt_cost').text(cost);
+    // Update OpenRouter Economics panel (model info + totals)
+    try { const model = model_list.find(x => x.id === oai_settings.openrouter_model); updateOpenRouterEconomicsPanel({ model }); } catch (e) { /* noop */ }
+    try { updateOpenRouterTotalsPanel(); } catch (e) { /* noop */ }
 }
+
+function renderPerResponseCostPill({ base, actual, saved, prompt, completion, cached }) {
+    // Attach a compact pill to the last assistant message
+    const target = $('#chat .mes').last().find('.mes_block');
+    if (!target.length) return;
+    const existing = target.find('.mes_cost_pill');
+    if (existing.length) existing.remove();
+    const title = `Prompt=${prompt} | Completion=${completion}${cached ? ` | Cached=${cached}` : ''}`;
+    const pill = $(`<div class="mes_cost_pill opacity50p" title="${title}">
+        <small>Cost: $${actual.toFixed(6)} | Base: $${base.toFixed(6)} | Saved: $${saved.toFixed(6)}${cached ? ` (cached ${cached})` : ''}</small>
+    </div>`);
+    // Place before text to keep it near header
+    const textNode = target.find('.mes_text');
+    if (textNode.length) {
+        pill.insertBefore(textNode);
+    } else {
+        target.append(pill);
+    }
+}
+// --- End OpenRouter Savings UI ---
+
+function updateOpenRouterEconomicsPanel({ model, base = null, actual = null, saved = null }) {
+    // Update model info
+    if (model) {
+        $('#or_econ_model').text(model.name || model.id || '—');
+        const inUSDPerK = Number(model.pricing?.prompt || 0);
+        const outUSDPerK = Number(model.pricing?.completion || 0);
+        $('#or_econ_price_in').text(isFinite(inUSDPerK) ? inUSDPerK.toFixed(4) : '—');
+        $('#or_econ_price_out').text(isFinite(outUSDPerK) ? outUSDPerK.toFixed(4) : '—');
+        $('#or_econ_ctx').text(model.context_length || '—');
+    }
+    // Update last response stats, when provided
+    if (Number.isFinite(base)) $('#or_econ_last_base').text(`$${base.toFixed(6)}`);
+    if (Number.isFinite(actual)) $('#or_econ_last_actual').text(`$${actual.toFixed(6)}`);
+    if (Number.isFinite(saved)) {
+        const sign = saved >= 0 ? '' : '-';
+        $('#or_econ_last_saved').text(`${sign}$${Math.abs(saved).toFixed(6)}`);
+    }
+}
+
+async function updateOpenRouterTotalsPanel() {
+    try {
+        const res = await fetch('/api/costs/get', { method: 'POST', headers: getRequestHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const base = Number(data.total_base || 0);
+        const actual = Number(data.total_actual || 0);
+        const saved = Number((base - actual) || 0);
+        $('#or_econ_total_base').text(`$${base.toFixed(6)}`);
+        $('#or_econ_total_actual').text(`$${actual.toFixed(6)}`);
+        $('#or_econ_total_saved').text(`$${saved.toFixed(6)}`);
+    } catch (e) { /* noop */ }
+}
+
+
 
 function saveModelList(data) {
     model_list = data.map((model) => ({ ...model }));
@@ -2396,14 +2454,26 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
                 // OpenRouter usage accounting for streaming (final chunk carries usage when stream_options.include_usage=true)
                 if (!postedUsage && oai_settings.chat_completion_source === chat_completion_sources.OPENROUTER && parsed?.usage) {
                     const u = parsed.usage;
-                    const prompt = Number(u.prompt_tokens || 0);
-                    const completion = Number(u.completion_tokens || 0);
-                    const base = (3e-6 * prompt) + (15e-6 * completion);
-                    const actual = Number(u.cost || 0);
-                    const saved = base - actual;
-                    postedUsage = true;
-                    console.info(`[Costs][stream] base=$${base.toFixed(6)} actual=$${actual.toFixed(6)} saved=$${saved.toFixed(6)} (p=${prompt}, c=${completion})`);
-                    try { await fetch('/api/costs/add', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ base, actual }) }); } catch (e) { console.warn('Failed to add costs', e); }
+                    const model = model_list.find(m => m.id === oai_settings.openrouter_model);
+                    const hasPricing = !!(model && model.pricing && Number.isFinite(Number(model.pricing.prompt)) && Number.isFinite(Number(model.pricing.completion)));
+                    const hasActual = typeof u.cost === 'number' && Number.isFinite(u.cost);
+                    if (hasPricing && hasActual) {
+                        const prompt = Number(u.prompt_tokens || 0);
+                        const completion = Number(u.completion_tokens || 0);
+                        const base = (Number(model.pricing.prompt) * prompt) + (Number(model.pricing.completion) * completion);
+                        const actual = Number(u.cost);
+                        const saved = base - actual;
+                        const cached = Number((u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) ?? u.cache_read_input_tokens ?? 0);
+                        postedUsage = true;
+                        console.info(`[Costs][stream] base=$${base.toFixed(6)} actual=$${actual.toFixed(6)} saved=$${saved.toFixed(6)} (p=${prompt}, c=${completion}${cached ? `, cached=${cached}` : ''}, model=${model?.id || 'unknown'})`);
+                        try { await fetch('/api/costs/add', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ base, actual }) }); } catch (e) { console.warn('Failed to add costs', e); }
+                        try { updateOpenRouterEconomicsPanel({ model, base, actual, saved }); } catch (_) { /* noop */ }
+                        try { updateOpenRouterTotalsPanel(); } catch (_) { /* noop */ }
+                        try { renderPerResponseCostPill({ base, actual, saved, prompt, completion, cached }); } catch (_) { /* noop */ }
+                    } else {
+                        if (!hasPricing) console.info('[Costs][stream] Skipping totals: no pricing found for current OR model.');
+                        if (!hasActual) console.info('[Costs][stream] Skipping totals: usage.cost missing from stream usage.');
+                    }
                 }
 
                 if (Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
@@ -2432,16 +2502,28 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
             throw new Error(message);
         }
 
-        // OpenRouter usage accounting for non-streaming
+        // OpenRouter usage accounting for non-streaming using per-model OR pricing only
         if (oai_settings.chat_completion_source === chat_completion_sources.OPENROUTER && data?.usage) {
             const u = data.usage;
-            const prompt = Number(u.prompt_tokens || 0);
-            const completion = Number(u.completion_tokens || 0);
-            const base = (3e-6 * prompt) + (15e-6 * completion);
-            const actual = Number(u.cost || 0);
-            const saved = base - actual;
-            console.info(`[Costs][non-stream] base=$${base.toFixed(6)} actual=$${actual.toFixed(6)} saved=$${saved.toFixed(6)} (p=${prompt}, c=${completion})`);
-            try { await fetch('/api/costs/add', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ base, actual }) }); } catch (e) { console.warn('Failed to add costs', e); }
+            const model = model_list.find(m => m.id === oai_settings.openrouter_model);
+            const hasPricing = !!(model && model.pricing && Number.isFinite(Number(model.pricing.prompt)) && Number.isFinite(Number(model.pricing.completion)));
+            const hasActual = typeof u.cost === 'number' && Number.isFinite(u.cost);
+            if (hasPricing && hasActual) {
+                const prompt = Number(u.prompt_tokens || 0);
+                const completion = Number(u.completion_tokens || 0);
+                const base = (Number(model.pricing.prompt) * prompt) + (Number(model.pricing.completion) * completion);
+                const actual = Number(u.cost);
+                const saved = base - actual;
+                const cached = Number((u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) ?? u.cache_read_input_tokens ?? 0);
+                console.info(`[Costs][non-stream] base=$${base.toFixed(6)} actual=$${actual.toFixed(6)} saved=$${saved.toFixed(6)} (p=${prompt}, c=${completion}${cached ? `, cached=${cached}` : ''}, model=${model?.id || 'unknown'})`);
+                try { await fetch('/api/costs/add', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ base, actual }) }); } catch (e) { console.warn('Failed to add costs', e); }
+                try { updateOpenRouterEconomicsPanel({ model, base, actual, saved }); } catch (_) { /* noop */ }
+                try { updateOpenRouterTotalsPanel(); } catch (_) { /* noop */ }
+                try { renderPerResponseCostPill({ base, actual, saved, prompt, completion, cached }); } catch (_) { /* noop */ }
+            } else {
+                if (!hasPricing) console.info('[Costs][non-stream] Skipping totals: no pricing found for current OR model.');
+                if (!hasActual) console.info('[Costs][non-stream] Skipping totals: usage.cost missing in non-stream response.');
+            }
         }
 
         if (type !== 'quiet') {
