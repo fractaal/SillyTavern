@@ -152,6 +152,8 @@ function applyFirstAnchorReconstruction(request) {
             sys.push(request.body.messages[i]);
             i++;
         }
+        
+        console.log("\n\n");
 
         // Trim trailing floating system messages (common for reminders)
         const remainder = request.body.messages.slice(i);
