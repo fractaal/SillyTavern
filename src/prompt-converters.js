@@ -931,83 +931,155 @@ export function convertTextCompletionPrompt(messages) {
 }
 
 /**
- * Append cache_control object to a Claude messages at depth. Directly modifies the messages array.
- * @param {any[]} messages Messages to modify
- * @param {number} cachingAtDepth Depth at which caching is supposed to occur
- * @param {string} ttl TTL value
+ * Append cache_control anchors for Claude messages.
+ * Updated semantics:
+ * - Primary anchor: nth user message from the end (cachingAtDepth with 0 = most recent user)
+ * - Additional anchors: keep walking backward and add an anchor on the next user message whenever
+ *   approximately 20 content blocks (of ANY messages) have been traversed since the last anchor.
+ * - Anchors are always placed on user messages. Assistant messages are never tagged.
+ * Directly mutates the messages array.
+ * @param {any[]} messages Messages to modify (Claude Messages API shape)
+ * @param {number} cachingAtDepth Nth user message from the end to anchor (0 = last user)
+ * @param {string} ttl TTL value (e.g., '5m' or '1h')
  */
 export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    if (!Number.isInteger(cachingAtDepth) || cachingAtDepth < 0) return;
+
+    const MAX_ANCHORS = 3;
+    const ANCHOR_SPACING_BLOCKS = 20;
+
     let passedThePrefill = false;
-    let depth = 0;
-    let previousRoleName = '';
+    let userDepth = -1;
+    let anchorsPlaced = 0;
+    let blocksSinceLastAnchor = 0;
+
+    const countBlocks = (msg) => Array.isArray(msg?.content) ? msg.content.length : 0;
+
+    const setCacheOnUserMessage = (msg) => {
+        if (!msg || msg.role !== 'user') return false;
+        const content = msg.content;
+        if (!Array.isArray(content) || content.length === 0) return false;
+        // Prefer tagging the last text block if present; fallback to last block
+        let idx = -1;
+        for (let i = content.length - 1; i >= 0; i--) {
+            if (content[i] && content[i].type === 'text') { idx = i; break; }
+        }
+        if (idx === -1) idx = content.length - 1;
+        if (!content[idx]) return false;
+        content[idx].cache_control = { type: 'ephemeral', ttl };
+        return true;
+    };
 
     for (let i = messages.length - 1; i >= 0; i--) {
-        if (!passedThePrefill && messages[i].role === 'assistant') {
+        const msg = messages[i];
+        if (!passedThePrefill && msg.role === 'assistant') {
+            // Skip assistant prefill at the very end
             continue;
         }
-
         passedThePrefill = true;
 
-        if (messages[i].role !== previousRoleName) {
-            if (depth === cachingAtDepth || depth === cachingAtDepth + 2) {
-                const content = messages[i].content;
-                content[content.length - 1].cache_control = { type: 'ephemeral', ttl: ttl };
-            }
+        blocksSinceLastAnchor += countBlocks(msg);
 
-            if (depth === cachingAtDepth + 2) {
-                break;
+        if (msg.role === 'user') {
+            userDepth += 1;
+            // Place primary anchor
+            if (anchorsPlaced === 0 && userDepth === cachingAtDepth) {
+                if (setCacheOnUserMessage(msg)) {
+                    anchorsPlaced++;
+                    blocksSinceLastAnchor = 0;
+                    if (anchorsPlaced >= MAX_ANCHORS) break;
+                }
+                continue;
             }
-
-            depth += 1;
-            previousRoleName = messages[i].role;
+            // Place additional anchors every ~20 blocks
+            if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
+                if (setCacheOnUserMessage(msg)) {
+                    anchorsPlaced++;
+                    blocksSinceLastAnchor = 0;
+                    if (anchorsPlaced >= MAX_ANCHORS) break;
+                }
+            }
         }
     }
 }
 
 /**
- * Append cache_control headers to an OpenRouter request at depth. Directly modifies the
- * messages array.
+ * Append cache_control anchors for Claude via OpenRouter (Chat Completions-style messages).
+ * Semantics mirror cachingAtDepthForClaude. Content may be string or array; we only convert to array when tagging.
+ * Directly mutates the messages array.
  * @param {object[]} messages Array of messages
- * @param {number} cachingAtDepth Depth at which caching is supposed to occur
+ * @param {number} cachingAtDepth Nth user message from the end to anchor (0 = last user)
  * @param {string} ttl TTL value
  */
 export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl) {
-    //caching the prefill is a terrible idea in general
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    if (!Number.isInteger(cachingAtDepth) || cachingAtDepth < 0) return;
+
+    const MAX_ANCHORS = 3;
+    const ANCHOR_SPACING_BLOCKS = 20;
+
     let passedThePrefill = false;
-    //depth here is the number of message role switches
-    let depth = 0;
-    let previousRoleName = '';
+    let userDepth = -1;
+    let anchorsPlaced = 0;
+    let blocksSinceLastAnchor = 0;
+
+    const ensureArrayContent = (msg) => {
+        if (!msg) return [];
+        if (Array.isArray(msg.content)) return msg.content;
+        const text = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
+        msg.content = [{ type: 'text', text }];
+        return msg.content;
+    };
+
+    const countBlocks = (msg) => {
+        if (!msg) return 0;
+        if (Array.isArray(msg.content)) return msg.content.length;
+        if (typeof msg.content === 'string') return msg.content.length > 0 ? 1 : 0;
+        return 0;
+    };
+
+    const setCacheOnUserMessage = (msg) => {
+        if (!msg || msg.role !== 'user') return false;
+        const content = ensureArrayContent(msg);
+        if (content.length === 0) return false;
+        // Prefer the last text block
+        let idx = -1;
+        for (let i = content.length - 1; i >= 0; i--) {
+            if (content[i] && content[i].type === 'text') { idx = i; break; }
+        }
+        if (idx === -1) idx = content.length - 1;
+        content[idx].cache_control = { type: 'ephemeral', ttl };
+        return true;
+    };
+
     for (let i = messages.length - 1; i >= 0; i--) {
-        if (!passedThePrefill && messages[i].role === 'assistant') {
+        const msg = messages[i];
+        if (!passedThePrefill && msg.role === 'assistant') {
+            // Skip assistant prefill at the very end
             continue;
         }
-
         passedThePrefill = true;
 
-        if (messages[i].role !== previousRoleName) {
-            if (depth === cachingAtDepth || depth === cachingAtDepth + 2) {
-                const content = messages[i].content;
-                if (typeof content === 'string') {
-                    messages[i].content = [{
-                        type: 'text',
-                        text: content,
-                        cache_control: { type: 'ephemeral', ttl: ttl },
-                    }];
-                } else {
-                    const contentPartCount = content.length;
-                    content[contentPartCount - 1].cache_control = {
-                        type: 'ephemeral',
-                        ttl: ttl,
-                    };
+        blocksSinceLastAnchor += countBlocks(msg);
+
+        if (msg.role === 'user') {
+            userDepth += 1;
+            if (anchorsPlaced === 0 && userDepth === cachingAtDepth) {
+                if (setCacheOnUserMessage(msg)) {
+                    anchorsPlaced++;
+                    blocksSinceLastAnchor = 0;
+                    if (anchorsPlaced >= MAX_ANCHORS) break;
+                }
+                continue;
+            }
+            if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
+                if (setCacheOnUserMessage(msg)) {
+                    anchorsPlaced++;
+                    blocksSinceLastAnchor = 0;
+                    if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
             }
-
-            if (depth === cachingAtDepth + 2) {
-                break;
-            }
-
-            depth += 1;
-            previousRoleName = messages[i].role;
         }
     }
 }
