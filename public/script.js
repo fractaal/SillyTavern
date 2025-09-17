@@ -266,6 +266,7 @@ import { initDataMaid } from './scripts/data-maid.js';
 import { clearItemizedPrompts, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts } from './scripts/itemized-prompts.js';
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
+import { initAccessibility } from './scripts/a11y.js';
 
 // API OBJECT FOR EXTERNAL WIRING
 globalThis.SillyTavern = {
@@ -318,6 +319,7 @@ await new Promise((resolve) => {
 
 // Configure toast library:
 toastr.options = {
+    positionClass: 'toast-top-center',
     closeButton: false,
     progressBar: false,
     showDuration: 250,
@@ -687,6 +689,7 @@ async function firstLoadInit() {
     initCustomSelectedSamplers();
     initDataMaid();
     initItemizedPrompts();
+    initAccessibility();
     addDebugFunctions();
     doDailyExtensionUpdatesCheck();
     await hideLoader();
@@ -5367,6 +5370,8 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
                 case chat_completion_sources.CUSTOM:
                 case chat_completion_sources.COHERE:
                 case chat_completion_sources.XAI:
+                case chat_completion_sources.ELECTRONHUB:
+                case chat_completion_sources.AZURE_OPENAI:
                 default:
                     result = tryParse(text);
                     break;
@@ -6747,7 +6752,7 @@ export function changeMainAPI() {
         $('#ai_module_block_novel').css('display', 'none');
     }
 
-    $('#prompt_cost_block').toggle(selectedVal === 'textgenerationwebui');
+    $('#prompt_cost_block').toggle(selectedVal === 'textgenerationwebui' && textgen_settings.type === textgen_types.OPENROUTER);
 
     // Hide common settings for OpenAI
     console.debug('value?', selectedVal);
