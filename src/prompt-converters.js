@@ -369,6 +369,112 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
 }
 
 /**
+ * Pre-pass compaction for Claude: seal archival UA turns into a single cached user message
+ * and leave a live, editable tail in native form. Tools are excluded from the sealed text.
+ *
+ * Shape after compaction (if enabled and triggered):
+ *   [ sealedMegaprompt(user, single text block) ] + [ live tail UA messages ]
+ * No middle region: any leftover beyond the last multiple is absorbed by the live tail.
+ *
+ * @param {object[]} messages Claude Messages API shape (no leading system here)
+ * @param {number} cachingAtDepth Configured cachingAtDepth (>=0 to enable derivation)
+ * @param {{ turnMultiple?: number, minLiveTailTurns?: number, ttl?: string, enabled?: boolean }} [opts]
+ * @returns {object[]} New messages array (compacted) or original array if not applicable
+ */
+export function applyMegapromptCompaction(messages, cachingAtDepth, opts = {}) {
+    try {
+        const enabled = opts.enabled ?? getConfigValue('claude.megaprompt.enabled', false, 'boolean');
+        if (!enabled) return messages;
+        if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+        const turnMultiple = Math.max(1, Number(getConfigValue('claude.megaprompt.turnMultiple', opts.turnMultiple ?? 50, 'number')) || 50);
+        const minTailCfg = Number(getConfigValue('claude.megaprompt.minLiveTailTurns', opts.minLiveTailTurns ?? 10, 'number')) || 10;
+        const ttl = String(opts.ttl ?? (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m'));
+
+        // Build a list of indices for UA messages and extract their text previews for sealing
+        /** @type {number[]} */
+        const uaIdx = [];
+        for (let i = 0; i < messages.length; i++) {
+            const m = messages[i];
+            if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+            uaIdx.push(i);
+        }
+        if (uaIdx.length === 0) return messages;
+
+        // Derive live tail size from cachingAtDepth
+        const baseTailTurns = Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0
+            ? Math.max(2 * cachingAtDepth, minTailCfg)
+            : minTailCfg;
+
+        const archivalTurns = Math.max(0, uaIdx.length - baseTailTurns);
+        if (archivalTurns < turnMultiple) {
+            // Not enough archival history to seal yet
+            return messages;
+        }
+
+        // We only seal up to the last completed multiple to keep the sealed bytes stable between requests
+        const lastMultiple = Math.floor(archivalTurns / turnMultiple) * turnMultiple;
+        if (lastMultiple <= 0) return messages;
+
+        // Effective tail must also absorb the leftover beyond the last multiple to avoid any middle region
+        const leftoverBeyondMultiple = archivalTurns - lastMultiple; // 0..(turnMultiple-1)
+        const effectiveTailTurns = Math.max(baseTailTurns, leftoverBeyondMultiple);
+
+        // Compute the slice boundaries in UA space
+        const sealedUaCount = lastMultiple; // number of UA turns to include in the sealed text
+        const tailUaCount = Math.min(uaIdx.length, effectiveTailTurns);
+
+        // Map sealed UA turns back to message indices and collect deterministic text
+        const sealedMsgIdx = uaIdx.slice(0, sealedUaCount);
+        const tailMsgIdx = uaIdx.slice(uaIdx.length - tailUaCount);
+
+        const getTextFromMessage = (msg) => {
+            if (!msg) return '';
+            if (typeof msg.content === 'string') return msg.content;
+            if (Array.isArray(msg.content)) {
+                return msg.content
+                    .filter(p => p && p.type === 'text' && typeof p.text === 'string')
+                    .map(p => p.text)
+                    .join('\n\n');
+            }
+            return '';
+        };
+
+        // Build sealed transcript text (deterministic; no timestamps or ids)
+        let sealedText = `Earlier transcript (sealed; turns 1–${sealedUaCount}).`;
+        for (const idx of sealedMsgIdx) {
+            const m = messages[idx];
+            const roleLabel = m.role === 'assistant' ? 'Assistant' : 'User';
+            const text = getTextFromMessage(m).trim();
+            if (!text) continue;
+            sealedText += `\n\n${text}`;
+        }
+        if (!sealedText) return messages; // nothing meaningful to seal
+
+        // Compose sealed message (single text block)
+        const sealedMegapromptMsg = {
+            role: 'user',
+            content: [{ type: 'text', text: sealedText, cache_control: { type: 'ephemeral', ttl } }],
+        };
+
+        // Final assembly: [sealed] + [live tail messages from the first tail UA index to end]
+        // Keep the live tail intact in original order (including potential tool messages)
+        const compacted = [];
+        compacted.push(sealedMegapromptMsg);
+
+        const tailStartIdx = Math.min(...tailMsgIdx);
+        for (let i = tailStartIdx; i < messages.length; i++) {
+            compacted.push(messages[i]);
+        }
+
+        return compacted;
+    } catch (e) {
+        console.warn('[Megaprompt] Compaction failed; falling back to original messages:', e);
+        return messages;
+    }
+}
+
+/**
  * Convert a prompt from the ChatML objects to the format used by Cohere.
  * @param {object[]} messages Array of messages
  * @param {PromptNames} names Prompt names
@@ -946,8 +1052,9 @@ export function convertTextCompletionPrompt(messages) {
 export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
 
-    const MAX_ANCHORS = 4;
-    const ANCHOR_SPACING_BLOCKS = 20;
+    // Reserve 1 anchor for system prompt caching (explicit), leaving 2 for messages
+    const MAX_ANCHORS = 2;
+    const ANCHOR_SPACING_BLOCKS = 10;
 
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
@@ -1098,7 +1205,7 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
 
     // Phase 3: log when context exceeds max cache coverage
     if (overbudget) {
-        console.warn(color.yellow('[Claude caching] Context exceeds 4×20 coverage; parts of the prompt may be uncached.'));
+        console.warn(color.yellow(`[Claude caching] Context exceeds ${MAX_ANCHORS}×20 coverage; parts of the prompt may be uncached.`));
     }
 }
 
@@ -1112,8 +1219,9 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
 export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
 
-    const MAX_ANCHORS = 4;
-    const ANCHOR_SPACING_BLOCKS = 20;
+    // Reserve 1 anchor for system prompt caching (explicit), leaving 3 for messages
+    const MAX_ANCHORS = 2;
+    const ANCHOR_SPACING_BLOCKS = 10;
 
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
@@ -1263,7 +1371,7 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
 
     // Phase 3: log when context exceeds max cache coverage
     if (overbudget) {
-        console.warn(color.yellow('[Claude caching][OpenRouter] Context exceeds 4×20 coverage; parts of the prompt may be uncached.'));
+        console.warn(color.yellow(`[Claude caching][OpenRouter] Context exceeds ${MAX_ANCHORS}×20 coverage; parts of the prompt may be uncached.`));
     }
 }
 
