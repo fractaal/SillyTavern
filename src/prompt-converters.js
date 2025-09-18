@@ -945,20 +945,17 @@ export function convertTextCompletionPrompt(messages) {
  */
 export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
-    if (!Number.isInteger(cachingAtDepth) || cachingAtDepth < 0) return;
 
-    const MAX_ANCHORS = 3;
+    const MAX_ANCHORS = 4;
     const ANCHOR_SPACING_BLOCKS = 20;
 
-    let passedThePrefill = false;
-    let userDepth = -1;
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
 
-    // Track the most recent user message seen since the last anchor and the
-    // cumulative block count at that moment to support retroactive placement.
+    // Track most recent user for retroactive placement within each 20-block window
     let lastUserCandidate = null;
     let blocksAtLastUser = 0;
+    let lastAnchoredMsg = null;
 
     const countBlocks = (msg) => Array.isArray(msg?.content) ? msg.content.length : 0;
 
@@ -990,57 +987,93 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
         return true;
     };
 
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (!passedThePrefill && msg.role === 'assistant') {
-            // Skip assistant prefill at the very end
-            continue;
-        }
-        passedThePrefill = true;
+    const hasAnyAnchor = (msg) => Array.isArray(msg?.content) && msg.content.some(b => b && 'cache_control' in b);
 
-        // Count blocks for spacing regardless of role
+    const clearAnchorsOnMessage = (msg) => {
+        if (!Array.isArray(msg?.content)) return;
+        for (const b of msg.content) {
+            if (b && b.cache_control) delete b.cache_control;
+        }
+    };
+
+    const findNthUserFromEnd = (msgs, n) => {
+        if (!Number.isInteger(n) || n < 0) return null;
+        let passedThePrefill = false;
+        let seen = 0;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (!passedThePrefill && m.role === 'assistant') continue;
+            passedThePrefill = true;
+            if (m.role === 'user') {
+                if (seen === n) return m;
+                seen += 1;
+            }
+        }
+        return null;
+    };
+
+    // Precompute total blocks for diagnostics
+    let totalBlocks = 0;
+    for (const m of messages) totalBlocks += countBlocks(m);
+
+    // Phase 1: forward spacing anchors (≤ 20), retroactive to last seen user
+    for (let i = 0; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
+        const msg = messages[i];
         blocksSinceLastAnchor += countBlocks(msg);
 
         if (msg.role === 'user') {
-            userDepth += 1;
-            // Update last user candidate for retroactive placement
             lastUserCandidate = msg;
             blocksAtLastUser = blocksSinceLastAnchor;
-
-            // Place primary anchor on the requested depth
-            if (anchorsPlaced === 0 && userDepth === cachingAtDepth) {
-                if (setCacheOnUserMessage(msg)) {
-                    anchorsPlaced++;
-                    blocksSinceLastAnchor = 0;
-                    lastUserCandidate = null;
-                    blocksAtLastUser = 0;
-                    if (anchorsPlaced >= MAX_ANCHORS) break;
-                }
-                continue;
-            }
         }
 
-        // For subsequent anchors, enforce <= 20 blocks using retroactive placement
-        if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
+        if (blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
             if (lastUserCandidate) {
                 if (setCacheOnUserMessage(lastUserCandidate)) {
                     anchorsPlaced++;
-                    // Remove the portion up to the user where we anchored
+                    lastAnchoredMsg = lastUserCandidate;
                     blocksSinceLastAnchor -= blocksAtLastUser;
                     lastUserCandidate = null;
                     blocksAtLastUser = 0;
-                    if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
             } else {
-                // No user encountered within the last 20 blocks: fallback to tagging current message
                 if (setCacheOnAnyMessage(msg)) {
                     console.warn(color.yellow('[Claude caching] No user within 20 blocks; anchoring on non-user message.'));
                     anchorsPlaced++;
+                    lastAnchoredMsg = msg;
                     blocksSinceLastAnchor = 0;
-                    if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
             }
         }
+    }
+
+    // Phase 2: honor cachingAtDepth if under budget and near the end
+    if (Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0) {
+        const targetUser = findNthUserFromEnd(messages, cachingAtDepth);
+        if (targetUser) {
+            const nearEnd = blocksSinceLastAnchor < ANCHOR_SPACING_BLOCKS;
+            if (nearEnd) {
+                if (anchorsPlaced < MAX_ANCHORS) {
+                    if (!hasAnyAnchor(targetUser)) {
+                        if (setCacheOnUserMessage(targetUser)) {
+                            anchorsPlaced++;
+                            lastAnchoredMsg = targetUser;
+                        }
+                    }
+                } else if (anchorsPlaced >= MAX_ANCHORS && lastAnchoredMsg && lastAnchoredMsg !== targetUser) {
+                    // Retarget last anchor to the depth target within the final window
+                    clearAnchorsOnMessage(lastAnchoredMsg);
+                    if (!hasAnyAnchor(targetUser)) setCacheOnUserMessage(targetUser);
+                    lastAnchoredMsg = targetUser;
+                }
+            } else {
+                console.warn(color.yellow('[Claude caching] Over budget or far from end; cannot honor cachingAtDepth without exceeding 20-block spacing.'));
+            }
+        }
+    }
+
+    // Phase 3: log when context exceeds max cache coverage
+    if (totalBlocks > MAX_ANCHORS * ANCHOR_SPACING_BLOCKS) {
+        console.warn(color.yellow('[Claude caching] Context exceeds 4×20 coverage; parts of the prompt may be uncached.'));
     }
 }
 
@@ -1049,24 +1082,21 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
  * Semantics mirror cachingAtDepthForClaude. Content may be string or array; we only convert to array when tagging.
  * Directly mutates the messages array.
  * @param {object[]} messages Array of messages
- * @param {number} cachingAtDepth Nth user message from the end to anchor (0 = last user)
  * @param {string} ttl TTL value
  */
 export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
-    if (!Number.isInteger(cachingAtDepth) || cachingAtDepth < 0) return;
 
-    const MAX_ANCHORS = 3;
+    const MAX_ANCHORS = 4;
     const ANCHOR_SPACING_BLOCKS = 20;
 
-    let passedThePrefill = false;
-    let userDepth = -1;
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
 
     // Track the most recent user message since the last anchor (for retroactive placement)
     let lastUserCandidate = null;
     let blocksAtLastUser = 0;
+    let lastAnchoredMsg = null;
 
     const ensureArrayContent = (msg) => {
         if (!msg) return [];
@@ -1109,55 +1139,83 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
         return true;
     };
 
-    for (let i = messages.length - 1; i >= 0; i--) {
+    // Phase 1: forward spacing anchors (≤ 20), retroactive to last seen user
+    for (let i = 0; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
         const msg = messages[i];
-        if (!passedThePrefill && msg.role === 'assistant') {
-            // Skip assistant prefill at the very end
-            continue;
-        }
-        passedThePrefill = true;
 
-        // Count blocks regardless of role
         blocksSinceLastAnchor += countBlocks(msg);
 
         if (msg.role === 'user') {
-            userDepth += 1;
-            // Update last seen user for retroactive placement
             lastUserCandidate = msg;
             blocksAtLastUser = blocksSinceLastAnchor;
-
-            // First anchor at required depth
-            if (anchorsPlaced === 0 && userDepth === cachingAtDepth) {
-                if (setCacheOnUserMessage(msg)) {
-                    anchorsPlaced++;
-                    blocksSinceLastAnchor = 0;
-                    lastUserCandidate = null;
-                    blocksAtLastUser = 0;
-                    if (anchorsPlaced >= MAX_ANCHORS) break;
-                }
-                continue;
-            }
         }
 
-        // Enforce <= 20 spacing using retroactive placement on user or fallback on non-user
-        if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
+        if (blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
             if (lastUserCandidate) {
                 if (setCacheOnUserMessage(lastUserCandidate)) {
                     anchorsPlaced++;
+                    lastAnchoredMsg = lastUserCandidate;
                     blocksSinceLastAnchor -= blocksAtLastUser;
                     lastUserCandidate = null;
                     blocksAtLastUser = 0;
-                    if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
             } else {
                 if (setCacheOnAnyMessage(msg)) {
                     console.warn(color.yellow('[Claude caching][OpenRouter] No user within 20 blocks; anchoring on non-user message.'));
                     anchorsPlaced++;
+                    lastAnchoredMsg = msg;
                     blocksSinceLastAnchor = 0;
-                    if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
             }
         }
+    }
+
+    // Phase 2: honor cachingAtDepth if under budget and near the end
+    if (Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0) {
+        const targetUser = (() => {
+            // find nth user from the end
+            let passedThePrefill = false;
+            let seen = 0;
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const m = messages[i];
+                if (!passedThePrefill && m.role === 'assistant') continue;
+                passedThePrefill = true;
+                if (m.role === 'user') {
+                    if (seen === cachingAtDepth) return m;
+                    seen += 1;
+                }
+            }
+            return null;
+        })();
+
+        if (targetUser) {
+            const nearEnd = blocksSinceLastAnchor < ANCHOR_SPACING_BLOCKS;
+            if (nearEnd) {
+                if (anchorsPlaced < MAX_ANCHORS) {
+                    if (!setCacheOnUserMessage(targetUser)) {
+                        // If somehow can't tag user, fallback once on any
+                        setCacheOnAnyMessage(targetUser);
+                    } else {
+                        anchorsPlaced++;
+                        lastAnchoredMsg = targetUser;
+                    }
+                } else if (anchorsPlaced >= MAX_ANCHORS && lastAnchoredMsg && lastAnchoredMsg !== targetUser) {
+                    // Retarget last anchor to the depth target within the final window
+                    const content = ensureArrayContent(lastAnchoredMsg);
+                    for (const b of content) { if (b && b.cache_control) delete b.cache_control; }
+                    setCacheOnUserMessage(targetUser);
+                    lastAnchoredMsg = targetUser;
+                }
+            } else {
+                console.warn(color.yellow('[Claude caching][OpenRouter] Over budget or far from end; cannot honor cachingAtDepth without exceeding 20-block spacing.'));
+            }
+        }
+    }
+
+    // Phase 3: log when context exceeds max cache coverage
+    let totalBlocks = 0; for (const m of messages) totalBlocks += countBlocks(m);
+    if (totalBlocks > MAX_ANCHORS * ANCHOR_SPACING_BLOCKS) {
+        console.warn(color.yellow('[Claude caching][OpenRouter] Context exceeds 4×20 coverage; parts of the prompt may be uncached.'));
     }
 }
 
