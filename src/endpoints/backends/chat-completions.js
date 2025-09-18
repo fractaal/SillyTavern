@@ -2172,7 +2172,7 @@ router.post('/generate', function (request, response) {
                         if (m.content.type === 'text' && m.content.text) text = m.content.text;
                     }
                     const marker = hasCacheBreakpoint(m) ? ' (📦 cache breakpoint)' : '';
-                    logLines.push(`(${role})\t${quote(text)}${marker}`);
+                    logLines.push(`[${msgs.indexOf(m) + 1}] (${role})\t${quote(text)}${marker}`);
                 }
             }
             if (logLines.length) {
