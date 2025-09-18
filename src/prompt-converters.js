@@ -1053,8 +1053,8 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
 
     // Reserve 1 anchor for system prompt caching (explicit), leaving 2 for messages
-    const MAX_ANCHORS = 2;
-    const ANCHOR_SPACING_BLOCKS = 10;
+    const MAX_ANCHORS = getConfigValue('claude.maxAnchors', 2, 'number');
+    const ANCHOR_SPACING_BLOCKS = getConfigValue('claude.anchorSpacingBlocks', 18, 'number');
 
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
@@ -1220,8 +1220,8 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
     if (!Array.isArray(messages) || messages.length === 0) return;
 
     // Reserve 1 anchor for system prompt caching (explicit), leaving 3 for messages
-    const MAX_ANCHORS = 2;
-    const ANCHOR_SPACING_BLOCKS = 10;
+    const MAX_ANCHORS = getConfigValue('claude.maxAnchors', 2, 'number');
+    const ANCHOR_SPACING_BLOCKS = getConfigValue('claude.anchorSpacingBlocks', 18, 'number');
 
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
