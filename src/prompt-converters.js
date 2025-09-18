@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getConfigValue, tryParse } from './util.js';
+import { getConfigValue, tryParse, color } from './util.js';
 
 const PROMPT_PLACEHOLDER = getConfigValue('promptPlaceholder', 'Let\'s get started.');
 
@@ -934,9 +934,10 @@ export function convertTextCompletionPrompt(messages) {
  * Append cache_control anchors for Claude messages.
  * Updated semantics:
  * - Primary anchor: nth user message from the end (cachingAtDepth with 0 = most recent user)
- * - Additional anchors: keep walking backward and add an anchor on the next user message whenever
- *   approximately 20 content blocks (of ANY messages) have been traversed since the last anchor.
- * - Anchors are always placed on user messages. Assistant messages are never tagged.
+ * - Spacing guarantee: ensure each subsequent anchor is ≤ ~20 content blocks from the previous by retroactively
+ *   anchoring the last seen user message within that window.
+ * - Fallback: if no user message exists within the last ~20 blocks, place the anchor on the current non-user message
+ *   and log a WARN, then continue.
  * Directly mutates the messages array.
  * @param {any[]} messages Messages to modify (Claude Messages API shape)
  * @param {number} cachingAtDepth Nth user message from the end to anchor (0 = last user)
@@ -953,6 +954,11 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     let userDepth = -1;
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
+
+    // Track the most recent user message seen since the last anchor and the
+    // cumulative block count at that moment to support retroactive placement.
+    let lastUserCandidate = null;
+    let blocksAtLastUser = 0;
 
     const countBlocks = (msg) => Array.isArray(msg?.content) ? msg.content.length : 0;
 
@@ -971,6 +977,19 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
         return true;
     };
 
+    const setCacheOnAnyMessage = (msg) => {
+        const content = Array.isArray(msg?.content) ? msg.content : [];
+        if (content.length === 0) return false;
+        let idx = -1;
+        for (let i = content.length - 1; i >= 0; i--) {
+            if (content[i] && content[i].type === 'text') { idx = i; break; }
+        }
+        if (idx === -1) idx = content.length - 1;
+        if (!content[idx]) return false;
+        content[idx].cache_control = { type: 'ephemeral', ttl };
+        return true;
+    };
+
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
         if (!passedThePrefill && msg.role === 'assistant') {
@@ -979,22 +998,43 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
         }
         passedThePrefill = true;
 
+        // Count blocks for spacing regardless of role
         blocksSinceLastAnchor += countBlocks(msg);
 
         if (msg.role === 'user') {
             userDepth += 1;
-            // Place primary anchor
+            // Update last user candidate for retroactive placement
+            lastUserCandidate = msg;
+            blocksAtLastUser = blocksSinceLastAnchor;
+
+            // Place primary anchor on the requested depth
             if (anchorsPlaced === 0 && userDepth === cachingAtDepth) {
                 if (setCacheOnUserMessage(msg)) {
                     anchorsPlaced++;
                     blocksSinceLastAnchor = 0;
+                    lastUserCandidate = null;
+                    blocksAtLastUser = 0;
                     if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
                 continue;
             }
-            // Place additional anchors every ~20 blocks
-            if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
-                if (setCacheOnUserMessage(msg)) {
+        }
+
+        // For subsequent anchors, enforce <= 20 blocks using retroactive placement
+        if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
+            if (lastUserCandidate) {
+                if (setCacheOnUserMessage(lastUserCandidate)) {
+                    anchorsPlaced++;
+                    // Remove the portion up to the user where we anchored
+                    blocksSinceLastAnchor -= blocksAtLastUser;
+                    lastUserCandidate = null;
+                    blocksAtLastUser = 0;
+                    if (anchorsPlaced >= MAX_ANCHORS) break;
+                }
+            } else {
+                // No user encountered within the last 20 blocks: fallback to tagging current message
+                if (setCacheOnAnyMessage(msg)) {
+                    console.warn(color.yellow('[Claude caching] No user within 20 blocks; anchoring on non-user message.'));
                     anchorsPlaced++;
                     blocksSinceLastAnchor = 0;
                     if (anchorsPlaced >= MAX_ANCHORS) break;
@@ -1023,6 +1063,10 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
     let userDepth = -1;
     let anchorsPlaced = 0;
     let blocksSinceLastAnchor = 0;
+
+    // Track the most recent user message since the last anchor (for retroactive placement)
+    let lastUserCandidate = null;
+    let blocksAtLastUser = 0;
 
     const ensureArrayContent = (msg) => {
         if (!msg) return [];
@@ -1053,6 +1097,18 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
         return true;
     };
 
+    const setCacheOnAnyMessage = (msg) => {
+        const content = ensureArrayContent(msg);
+        if (content.length === 0) return false;
+        let idx = -1;
+        for (let i = content.length - 1; i >= 0; i--) {
+            if (content[i] && content[i].type === 'text') { idx = i; break; }
+        }
+        if (idx === -1) idx = content.length - 1;
+        content[idx].cache_control = { type: 'ephemeral', ttl };
+        return true;
+    };
+
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
         if (!passedThePrefill && msg.role === 'assistant') {
@@ -1061,20 +1117,41 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
         }
         passedThePrefill = true;
 
+        // Count blocks regardless of role
         blocksSinceLastAnchor += countBlocks(msg);
 
         if (msg.role === 'user') {
             userDepth += 1;
+            // Update last seen user for retroactive placement
+            lastUserCandidate = msg;
+            blocksAtLastUser = blocksSinceLastAnchor;
+
+            // First anchor at required depth
             if (anchorsPlaced === 0 && userDepth === cachingAtDepth) {
                 if (setCacheOnUserMessage(msg)) {
                     anchorsPlaced++;
                     blocksSinceLastAnchor = 0;
+                    lastUserCandidate = null;
+                    blocksAtLastUser = 0;
                     if (anchorsPlaced >= MAX_ANCHORS) break;
                 }
                 continue;
             }
-            if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
-                if (setCacheOnUserMessage(msg)) {
+        }
+
+        // Enforce <= 20 spacing using retroactive placement on user or fallback on non-user
+        if (anchorsPlaced > 0 && blocksSinceLastAnchor >= ANCHOR_SPACING_BLOCKS) {
+            if (lastUserCandidate) {
+                if (setCacheOnUserMessage(lastUserCandidate)) {
+                    anchorsPlaced++;
+                    blocksSinceLastAnchor -= blocksAtLastUser;
+                    lastUserCandidate = null;
+                    blocksAtLastUser = 0;
+                    if (anchorsPlaced >= MAX_ANCHORS) break;
+                }
+            } else {
+                if (setCacheOnAnyMessage(msg)) {
+                    console.warn(color.yellow('[Claude caching][OpenRouter] No user within 20 blocks; anchoring on non-user message.'));
                     anchorsPlaced++;
                     blocksSinceLastAnchor = 0;
                     if (anchorsPlaced >= MAX_ANCHORS) break;
