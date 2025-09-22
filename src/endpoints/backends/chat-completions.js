@@ -2183,11 +2183,35 @@ router.post('/generate', function (request, response) {
                 }
                 return false;
             };
-            const quote = (s) => `"${String(s).replace(/\s+/g, ' ').trim().slice(0, previewLen)}"`;
+            
+            const hashContent = (content) => {
+                const str = typeof content === 'string' ? content : JSON.stringify(content);
+                // Simple hash function for unique content identification
+                let hash = 0;
+                for (let i = 0; i < str.length; i++) {
+                    const char = str.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; // Convert to 32-bit integer
+                }
+                return Math.abs(hash).toString(16).slice(0, 6);
+            };
+
+            const createPreview = (text) => {
+                const cleaned = String(text).replace(/\s+/g, ' ').trim();
+                if (cleaned.length <= previewLen * 2 + 6) {
+                    return cleaned;
+                }
+                const start = cleaned.slice(0, previewLen);
+                const end = cleaned.slice(-previewLen);
+                return `${start}... ...${end}`;
+            };
 
             let logLines = [];
             if (isTextCompletion) {
-                logLines.push('Sent prompt: ' + quote(requestBody.prompt ?? ''));
+                const prompt = requestBody.prompt ?? '';
+                const preview = createPreview(prompt);
+                const hash = hashContent(prompt);
+                logLines.push(`Sent prompt: ${preview} (${hash})`);
             } else if (Array.isArray(requestBody.messages)) {
                 const msgs = requestBody.messages;
                 logLines.push(`Sent context (${msgs.length} total messages):`);
@@ -2202,8 +2226,11 @@ router.post('/generate', function (request, response) {
                     } else if (typeof m.content === 'object' && m.content !== null) {
                         if (m.content.type === 'text' && m.content.text) text = m.content.text;
                     }
+                    
+                    const preview = createPreview(text);
+                    const hash = hashContent(text);
                     const marker = hasCacheBreakpoint(m) ? ' (📦 cache breakpoint)' : '';
-                    logLines.push(`[${msgs.indexOf(m) + 1}] (${role})\t${quote(text)}${marker}`);
+                    logLines.push(`[${msgs.indexOf(m) + 1}] (${role})\t${preview} (${hash})${marker}`);
                 }
             }
             if (logLines.length) {
