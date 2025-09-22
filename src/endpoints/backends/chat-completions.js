@@ -158,15 +158,6 @@ async function sendClaudeRequest(request, response) {
         const useTools = Array.isArray(request.body.tools) && request.body.tools.length > 0;
         const useSystemPrompt = Boolean(request.body.claude_use_sysprompt);
         const convertedPrompt = convertClaudeMessages(request.body.messages, request.body.assistant_prefill, useSystemPrompt, useTools, getPromptNames(request));
-        // Apply megaprompt compaction pre-pass before anchor tagging
-        if (getConfigValue('claude.megaprompt.enabled', false, 'boolean')) {
-            convertedPrompt.messages = applyMegapromptCompaction(convertedPrompt.messages, cachingAtDepth, {
-                turnMultiple: getConfigValue('claude.megaprompt.turnMultiple', 50, 'number'),
-                minLiveTailTurns: getConfigValue('claude.megaprompt.minLiveTailTurns', 10, 'number'),
-                ttl: getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m',
-                enabled: true,
-            });
-        }
         const useThinking = /^claude-(3-7|opus-4|sonnet-4)/.test(request.body.model);
         const useWebSearch = /^claude-(3-5|3-7|opus-4|sonnet-4)/.test(request.body.model) && Boolean(request.body.enable_web_search);
         const isOpus41 = /^claude-opus-4-1/.test(request.body.model);
@@ -1761,9 +1752,39 @@ router.post('/bias', async function (request, response) {
 router.post('/generate', function (request, response) {
     if (!request.body) return response.status(400).send({ error: true });
 
+    // Optional transparent reconstruction to preserve cache hits under limited context
+    applyFirstAnchorReconstruction(request);
 
-	    // Optional transparent reconstruction to preserve cache hits under limited context
-	    applyFirstAnchorReconstruction(request);
+    // Megaprompt compaction: after FirstAnchor reconstruction, before any post-processing
+    try {
+        const isClaudeModel = (/^claude-/.test(request.body.model || '') || /anthropic\/claude-/.test(request.body.model || ''));
+        if (isClaudeModel && getConfigValue('claude.megaprompt.enabled', false, 'boolean') && Array.isArray(request.body.messages) && request.body.messages.length) {
+            // Preserve leading system messages and compact the remainder
+            let leadingSystemCount = 0;
+            for (let i = 0; i < request.body.messages.length; i++) {
+                const msg = request.body.messages[i];
+                if (msg && msg.role === 'system') {
+                    leadingSystemCount++;
+                    continue;
+                }
+                break;
+            }
+            const leadingSystems = request.body.messages.slice(0, leadingSystemCount);
+            const remainder = request.body.messages.slice(leadingSystemCount);
+
+            const cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1, 'number');
+            const compacted = applyMegapromptCompaction(remainder, cachingAtDepth, {
+                turnMultiple: getConfigValue('claude.megaprompt.turnMultiple', 50, 'number'),
+                minLiveTailTurns: getConfigValue('claude.megaprompt.minLiveTailTurns', 10, 'number'),
+                ttl: getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m',
+                enabled: true,
+            });
+
+            request.body.messages = [...leadingSystems, ...compacted];
+        }
+    } catch (e) {
+        console.warn('[Megaprompt] Pre-pass failed; continuing without compaction:', e);
+    }
 
     const postProcessingType = request.body.custom_prompt_post_processing;
     if (Array.isArray(request.body.messages) && postProcessingType) {
@@ -1873,27 +1894,6 @@ router.post('/generate', function (request, response) {
         const cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1, 'number');
         const isClaude3or4 = /anthropic\/claude-(3|opus-4|sonnet-4)/.test(request.body.model);
         const cacheTTL = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';
-        // Megaprompt compaction pre-pass for OpenRouter (preserve leading system messages)
-        if (getConfigValue('claude.megaprompt.enabled', false, 'boolean') && isClaude3or4 && Array.isArray(request.body.messages) && request.body.messages.length) {
-            let leadingSystemCount = 0;
-            for (let i = 0; i < request.body.messages.length; i++) {
-                const msg = request.body.messages[i];
-                if (msg && msg.role === 'system') {
-                    leadingSystemCount++;
-                    continue;
-                }
-                break;
-            }
-            const leadingSystems = request.body.messages.slice(0, leadingSystemCount);
-            const remainder = request.body.messages.slice(leadingSystemCount);
-            const compacted = applyMegapromptCompaction(remainder, cachingAtDepth, {
-                turnMultiple: getConfigValue('claude.megaprompt.turnMultiple', 50, 'number'),
-                minLiveTailTurns: getConfigValue('claude.megaprompt.minLiveTailTurns', 10, 'number'),
-                ttl: cacheTTL,
-                enabled: true,
-            });
-            request.body.messages = [...leadingSystems, ...compacted];
-        }
         if (Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0 && isClaude3or4) {
             cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth, cacheTTL);
         }
@@ -2183,7 +2183,7 @@ router.post('/generate', function (request, response) {
                 }
                 return false;
             };
-            
+
             const hashContent = (content) => {
                 const str = typeof content === 'string' ? content : JSON.stringify(content);
                 // Simple hash function for unique content identification
@@ -2226,7 +2226,7 @@ router.post('/generate', function (request, response) {
                     } else if (typeof m.content === 'object' && m.content !== null) {
                         if (m.content.type === 'text' && m.content.text) text = m.content.text;
                     }
-                    
+
                     const preview = createPreview(text);
                     const hash = hashContent(text);
                     const marker = hasCacheBreakpoint(m) ? ' (📦 cache breakpoint)' : '';
