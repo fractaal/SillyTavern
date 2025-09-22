@@ -451,7 +451,8 @@ export function applyMegapromptCompaction(messages, cachingAtDepth, opts = {}) {
         };
 
         // Build sealed transcript text (deterministic; no timestamps or ids)
-        let sealedText = `Earlier transcript (sealed; turns 1–${sealedUaCount}).`;
+        // let sealedText = `Earlier transcript (sealed; turns 1–${sealedUaCount}).`;
+        let sealedText = '';
         for (const idx of sealedMsgIdx) {
             const m = messages[idx];
             const roleLabel = m.role === 'assistant' ? 'Assistant' : 'User';
