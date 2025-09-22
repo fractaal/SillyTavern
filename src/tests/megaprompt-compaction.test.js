@@ -13,7 +13,7 @@ import { setConfigFilePath } from '../util.js';
 setConfigFilePath(path.resolve(process.cwd(), 'default/config.yaml'));
 
 // Import after setting env + config path so module init reads the right sources
-const { applyMegapromptCompaction } = await import('../prompt-converters.js');
+const { applyMegapromptCompaction, postProcessPrompt, PROMPT_PROCESSING_TYPE, convertClaudeMessages, cachingAtDepthForOpenRouterClaude } = await import('../prompt-converters.js');
 
 const msg = (role, content) => ({ role, content });
 const U = (t) => msg('user', t);
@@ -122,4 +122,43 @@ test('[megaprompt] sealed stable when prompt grows within same multiple', () => 
   const sealed7 = getSealedText(out7);
 
   assert.equal(sealed6, sealed7);
+});
+
+
+// 7) After MERGE post-processing and Claude conversion, sealed still has cache_control on first text part
+test('[megaprompt] sealed retains cache_control after MERGE + Claude conversion', () => {
+  const msgs = [U('1'), A('2'), U('3'), A('4'), U('5'), A('6')];
+  const compacted = applyMegapromptCompaction(msgs, 1, { enabled: true, turnMultiple: 4, minLiveTailTurns: 2, ttl: '5m' });
+
+  // Simulate optional custom post-processing the server may apply
+  const names = { charName: '', userName: '', groupNames: [], startsWithGroupName: () => false };
+  const merged = postProcessPrompt(compacted, PROMPT_PROCESSING_TYPE.MERGE, names);
+
+  const converted = convertClaudeMessages([...merged], /*prefill*/ '', /*useSysPrompt*/ false, /*useTools*/ false, names);
+  const first = converted.messages?.[0];
+  assert.equal(first?.role, 'user');
+  const firstText = first?.content?.find?.((c) => c?.type === 'text');
+  assert.ok(firstText?.cache_control, 'expected cache_control on first text part');
+  assert.equal(firstText.cache_control.type, 'ephemeral');
+  assert.equal(firstText.cache_control.ttl, '5m');
+});
+
+
+// 8) OpenRouter path: after MERGE, sealed gets a breakpoint via cachingAtDepthForOpenRouterClaude
+test('[megaprompt][openrouter] sealed gets cache_control via OpenRouter anchoring', () => {
+  const msgs = [U('1'), A('2'), U('3'), A('4'), U('5'), A('6')];
+  const compacted = applyMegapromptCompaction(msgs, 1, { enabled: true, turnMultiple: 4, minLiveTailTurns: 2, ttl: '5m' });
+
+  // Apply MERGE like the server may
+  const names = { charName: '', userName: '', groupNames: [], startsWithGroupName: () => false };
+  const merged = postProcessPrompt(compacted, PROMPT_PROCESSING_TYPE.MERGE, names);
+
+  // Simulate OpenRouter anchoring
+  cachingAtDepthForOpenRouterClaude(merged, /*depth*/ 1, /*ttl*/ '5m');
+
+  const first = merged?.[0];
+  assert.equal(first?.role, 'user');
+  const content = Array.isArray(first?.content) ? first.content : [{ type: 'text', text: String(first?.content ?? '') }];
+  const hasCache = content.some((c) => c?.type === 'text' && c?.cache_control);
+  assert.ok(hasCache, 'expected cache_control on sealed message for OpenRouter');
 });

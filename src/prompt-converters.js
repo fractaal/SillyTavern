@@ -299,6 +299,16 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
             });
         }
 
+        // If this message was the sealed megaprompt, ensure the first text part carries cache_control
+        if (message._megapromptSealed && Array.isArray(message.content)) {
+            const ttl = message._megapromptSealed.ttl || (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m');
+            const firstText = message.content.find(c => c && c.type === 'text');
+            if (firstText) {
+                firstText.cache_control = { type: 'ephemeral', ttl };
+            }
+        }
+
+
         // Remove offending properties
         delete message.name;
         delete message.tool_calls;
@@ -455,6 +465,8 @@ export function applyMegapromptCompaction(messages, cachingAtDepth, opts = {}) {
         const sealedMegapromptMsg = {
             role: 'user',
             content: [{ type: 'text', text: sealedText, cache_control: { type: 'ephemeral', ttl } }],
+            // Durable marker to re-attach cache_control after post-processing merges
+            _megapromptSealed: { ttl },
         };
 
         // Final assembly: [sealed] + [live tail messages from the first tail UA index to end]
@@ -1275,13 +1287,28 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
         return true;
     };
 
+
+    // Pre-anchor: if a sealed megaprompt exists, always give it a breakpoint first
+    let loopStart = 0;
+    const sealedIdx = messages.findIndex(m => m && m._megapromptSealed);
+    if (sealedIdx >= 0) {
+        if (setCacheOnAnyMessage(messages[sealedIdx])) {
+            anchorsPlaced++;
+            lastAnchoredMsg = messages[sealedIdx];
+            lastAnchoredIndex = sealedIdx;
+            anchorIdx.push(sealedIdx);
+            blocksSinceLastAnchor = 0; // reset spacing window from sealed
+        }
+        loopStart = sealedIdx + 1;
+    }
+
     // Precompute total blocks for diagnostics
     let totalBlocks = 0; for (let i = 0; i < messages.length; i++) totalBlocks += countBlocks(messages[i]);
     const capacity = MAX_ANCHORS * ANCHOR_SPACING_BLOCKS;
     const overbudget = totalBlocks > capacity;
 
     // Phase 1: forward spacing anchors (≤ 20), retroactive to last seen user
-    for (let i = 0; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
+    for (let i = loopStart; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
         const msg = messages[i];
 
         blocksSinceLastAnchor += countBlocks(msg);
