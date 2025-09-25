@@ -187,7 +187,6 @@ function onLockBackgroundClick(event = null) {
 
     // Update UI states to reflect the new lock.
     highlightLockedBackground();
-    toastr.success(t`Background locked for this chat.`);
 }
 
 /**
@@ -204,7 +203,6 @@ function onUnlockBackgroundClick(_event = null) {
     // Update UI states to reflect the removal of the lock.
     highlightLockedBackground();
     highlightSelectedBackground();
-    toastr.success(t`Background unlocked for this chat.`);
 }
 
 function isChatBackgroundLocked() {
