@@ -1050,6 +1050,25 @@ export function convertTextCompletionPrompt(messages) {
 }
 
 /**
+ * Strip any existing Anthropic cache_control breakpoints from message content blocks.
+ * Use this as a pre-pass to avoid exceeding the provider's breakpoint limit when
+ * old anchors linger (e.g., when prompt post-processing is disabled).
+ * Mutates the given messages array in place.
+ * @param {object[]} messages Claude Messages API-shaped messages
+ */
+export function stripClaudeCacheBreakpoints(messages) {
+    if (!Array.isArray(messages)) return;
+    for (const msg of messages) {
+        const content = msg?.content;
+        if (!Array.isArray(content)) continue;
+        for (const b of content) {
+            if (b && b.cache_control) delete b.cache_control;
+        }
+    }
+}
+
+
+/**
  * Append cache_control anchors for Claude messages.
  * Updated semantics:
  * - Primary anchor: nth user message from the end (cachingAtDepth with 0 = most recent user)
@@ -1064,6 +1083,10 @@ export function convertTextCompletionPrompt(messages) {
  */
 export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
+    // Pre-pass: wipe any stale cache_control anchors to avoid exceeding limits
+    stripClaudeCacheBreakpoints(messages);
+
+
 
     // Reserve 1 anchor for system prompt caching (explicit), leaving 2 for messages
     const MAX_ANCHORS = getConfigValue('claude.maxAnchors', 2, 'number');
@@ -1135,6 +1158,21 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
         return null;
     };
 
+
+    // Pre-anchor: if a sealed megaprompt exists, always give it a breakpoint first
+    let loopStart = 0;
+    const sealedIdx = messages.findIndex(m => m && m._megapromptSealed);
+    if (sealedIdx >= 0) {
+        if (setCacheOnAnyMessage(messages[sealedIdx])) {
+            anchorsPlaced++;
+            lastAnchoredMsg = messages[sealedIdx];
+            lastAnchoredIndex = sealedIdx;
+            anchorIdx.push(sealedIdx);
+            blocksSinceLastAnchor = 0; // reset spacing window from sealed
+        }
+        loopStart = sealedIdx + 1;
+    }
+
     // Precompute total blocks for diagnostics
     let totalBlocks = 0;
     for (let i = 0; i < messages.length; i++) totalBlocks += countBlocks(messages[i]);
@@ -1142,7 +1180,7 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
     const overbudget = totalBlocks > capacity;
 
     // Phase 1: forward spacing anchors (≤ 20), retroactive to last seen user
-    for (let i = 0; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
+    for (let i = loopStart; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
         const msg = messages[i];
         blocksSinceLastAnchor += countBlocks(msg);
 
@@ -1231,6 +1269,10 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
  */
 export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl) {
     if (!Array.isArray(messages) || messages.length === 0) return;
+    // Pre-pass: wipe any stale cache_control anchors to avoid exceeding limits
+    stripClaudeCacheBreakpoints(messages);
+
+
 
     // Reserve 1 anchor for system prompt caching (explicit), leaving 3 for messages
     const MAX_ANCHORS = getConfigValue('claude.maxAnchors', 2, 'number');
