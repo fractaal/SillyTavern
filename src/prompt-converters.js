@@ -1189,10 +1189,12 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
 
     // Phase 3: diagnostics
     if (overbudget) {
-        console.warn(color.yellow(`[Claude caching] Context exceeds ${MAX_ANCHORS}×${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
+        console.warn(color.yellow(`[Claude caching] Context exceeds ${MAX_ANCHORS}x${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
     }
 
     return;
+}
+
 
 
 /**
@@ -1315,14 +1317,15 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
         }
     }
 
-    if (overbudget) {
-        console.warn(color.yellow(`[Claude caching][OpenRouter] Context exceeds ${MAX_ANCHORS} d7${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
-    }
+    /*
+
 
     if (overbudget) {
-        console.warn(color.yellow(`[Claude caching][OpenRouter] Context exceeds ${MAX_ANCHORS}
+
  d${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
     }
+
+    */
 
     return;
 }
