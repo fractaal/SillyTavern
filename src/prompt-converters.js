@@ -426,9 +426,10 @@ export function applyMegapromptCompaction(messages, cachingAtDepth, opts = {}) {
         const lastMultiple = Math.floor(archivalTurns / turnMultiple) * turnMultiple;
         if (lastMultiple <= 0) return messages;
 
-        // Effective tail must also absorb the leftover beyond the last multiple to avoid any middle region
+        // Effective tail must absorb the leftover beyond the last multiple to avoid any middle region,
+        // i.e., it includes both the configured base tail and the leftover archival residue.
         const leftoverBeyondMultiple = archivalTurns - lastMultiple; // 0..(turnMultiple-1)
-        const effectiveTailTurns = Math.max(baseTailTurns, leftoverBeyondMultiple);
+        const effectiveTailTurns = baseTailTurns + leftoverBeyondMultiple;
 
         // Compute the slice boundaries in UA space
         const sealedUaCount = lastMultiple; // number of UA turns to include in the sealed text

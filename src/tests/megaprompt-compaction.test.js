@@ -165,3 +165,13 @@ test('[megaprompt][openrouter] places at least one anchor; sealed not required t
   }, 0);
   assert.ok(anchorCount >= 1, 'expected at least one cache_control anchor after OpenRouter anchoring');
 });
+
+
+// 9) Tail absorbs leftover beyond multiple to avoid any middle gap
+// UA: 8, depth=1 => baseTail=2, archival=6, lastMultiple=4, leftover=2 => effectiveTail=4 => [U5,A6,U7,A8]
+test('[megaprompt] tail absorbs leftover beyond multiple (no middle gap)', () => {
+  const msgs8 = [U('1'), A('2'), U('3'), A('4'), U('5'), A('6'), U('7'), A('8')];
+  const out = applyMegapromptCompaction(msgs8, 1, { enabled: true, turnMultiple: 4, minLiveTailTurns: 2, ttl: '5m' });
+  const tailTexts = texts(out.slice(1));
+  assert.deepEqual(tailTexts, ['5', '6', '7', '8']);
+});
