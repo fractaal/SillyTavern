@@ -2176,14 +2176,29 @@ router.post('/generate', function (request, response) {
     // Compact, formatted context preview for quick verification
     try {
         if (true) {
-            const previewLen = 15;
-            const hasCacheBreakpoint = (/** @type {any} */ msg) => {
-                if (msg && typeof msg === 'object' && msg.cache_control) return true;
-                const c = msg?.content;
-                if (Array.isArray(c)) {
-                    return c.some(p => p && typeof p === 'object' && p.cache_control);
-                }
-                return false;
+            const previewLen = 20;
+
+            const getCacheTTL = (/** @type {any} */ msg) => {
+                try {
+                    if (msg && typeof msg === 'object' && msg.cache_control && typeof msg.cache_control === 'object') {
+                        const t = msg.cache_control.ttl;
+                        if (t) return String(t);
+                    }
+                    const c = msg?.content;
+                    if (Array.isArray(c)) {
+                        for (const p of c) {
+                            if (p && typeof p === 'object' && p.cache_control && typeof p.cache_control === 'object') {
+                                const t = p.cache_control.ttl;
+                                if (t) return String(t);
+                            }
+                        }
+                    } else if (c && typeof c === 'object') {
+                        if (c.cache_control && typeof c.cache_control === 'object' && c.cache_control.ttl) {
+                            return String(c.cache_control.ttl);
+                        }
+                    }
+                } catch {}
+                return null;
             };
 
             const hashContent = (content) => {
@@ -2231,7 +2246,8 @@ router.post('/generate', function (request, response) {
 
                     const preview = createPreview(text);
                     const hash = hashContent(text);
-                    const marker = hasCacheBreakpoint(m) ? ' (📦 cache breakpoint)' : '';
+                    const ttl = getCacheTTL(m);
+                    const marker = ttl ? ` (📦 ttl=${ttl})` : '';
                     logLines.push(`[${msgs.indexOf(m) + 1}] (${role})\t${preview} (${hash})${marker}`);
                 }
             }
