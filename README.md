@@ -7,6 +7,8 @@ LLM Frontend for Power Users
 - GitHub: <https://github.com/SillyTavern/SillyTavern>
 - Docs: <https://docs.sillytavern.app/>
 - Discord: <https://discord.gg/sillytavern>
+- Prompt caching architecture: ./PROMPT_CACHING_ARCHITECTURE.md
+
 - Reddit: <https://reddit.com/r/SillyTavernAI>
 
 ## License

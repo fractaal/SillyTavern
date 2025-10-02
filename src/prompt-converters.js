@@ -299,12 +299,17 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
             });
         }
 
-        // If this message was the sealed megaprompt, ensure the first text part carries cache_control
+        // If this message was the sealed megaprompt, ensure the LAST content part carries cache_control
         if (message._megapromptSealed && Array.isArray(message.content)) {
             const ttl = message._megapromptSealed.ttl || (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m');
-            const firstText = message.content.find(c => c && c.type === 'text');
-            if (firstText) {
-                firstText.cache_control = { type: 'ephemeral', ttl };
+            // Find the last text part; if none, fall back to the last part
+            let idx = -1;
+            for (let i = message.content.length - 1; i >= 0; i--) {
+                if (message.content[i] && message.content[i].type === 'text') { idx = i; break; }
+            }
+            if (idx === -1) idx = message.content.length - 1;
+            if (idx >= 0 && message.content[idx]) {
+                message.content[idx].cache_control = { type: 'ephemeral', ttl };
             }
         }
 
@@ -1059,9 +1064,31 @@ export function convertTextCompletionPrompt(messages) {
  */
 export function stripClaudeCacheBreakpoints(messages) {
     if (!Array.isArray(messages)) return;
+    const preAnchorSealed = getConfigValue('claude.megaprompt.preAnchorSealed', false, 'boolean');
     for (const msg of messages) {
         const content = msg?.content;
         if (!Array.isArray(content)) continue;
+
+        // If opted-in, preserve a single cache_control on the LAST part of the sealed megaprompt
+        if (preAnchorSealed && msg?._megapromptSealed) {
+            // First remove any lingering cache_control from all parts
+            for (const b of content) {
+                if (b && b.cache_control) delete b.cache_control;
+            }
+            // Re-apply cache_control to the last text part (or last part if no text parts)
+            let idx = -1;
+            for (let i = content.length - 1; i >= 0; i--) {
+                if (content[i] && content[i].type === 'text') { idx = i; break; }
+            }
+            if (idx === -1 && content.length > 0) idx = content.length - 1;
+            if (idx !== -1 && content[idx]) {
+                const ttl = msg._megapromptSealed.ttl || (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m');
+                content[idx].cache_control = { type: 'ephemeral', ttl };
+            }
+            continue; // Skip general stripping for sealed message
+        }
+
+        // Default behavior: strip all cache_control
         for (const b of content) {
             if (b && b.cache_control) delete b.cache_control;
         }
@@ -1091,8 +1118,14 @@ export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
 
     // New anchoring policy: fixed W-multiples + optional tail-depth if budget remains; no pre-anchoring sealed
     // Config defaults aligned to: M=3, W=20
-    const MAX_ANCHORS = getConfigValue('claude.maxAnchors', 3, 'number');
+    let MAX_ANCHORS = getConfigValue('claude.maxAnchors', 3, 'number');
     const ANCHOR_SPACING_BLOCKS = getConfigValue('claude.anchorSpacingBlocks', 20, 'number');
+
+    // If we pre-anchor the sealed megaprompt, reduce the remaining message-anchor budget by 1
+    const preAnchorSealed = getConfigValue('claude.megaprompt.preAnchorSealed', false, 'boolean');
+    if (preAnchorSealed && messages.some(m => m && m._megapromptSealed)) {
+        MAX_ANCHORS = Math.max(0, Number(MAX_ANCHORS) - 1);
+    }
 
     const countBlocks = (msg) => Array.isArray(msg?.content) ? msg.content.length : 0;
 
@@ -1213,8 +1246,14 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
 
 
     // New anchoring policy for OpenRouter: fixed W-multiples + optional tail-depth; no pre-anchoring sealed
-    const MAX_ANCHORS = getConfigValue('claude.maxAnchors', 3, 'number');
+    let MAX_ANCHORS = getConfigValue('claude.maxAnchors', 3, 'number');
     const ANCHOR_SPACING_BLOCKS = getConfigValue('claude.anchorSpacingBlocks', 20, 'number');
+
+    // If we pre-anchor the sealed megaprompt, reduce the remaining message-anchor budget by 1
+    const preAnchorSealed = getConfigValue('claude.megaprompt.preAnchorSealed', false, 'boolean');
+    if (preAnchorSealed && messages.some(m => m && m._megapromptSealed)) {
+        MAX_ANCHORS = Math.max(0, Number(MAX_ANCHORS) - 1);
+    }
 
     const ensureArrayContent = (msg) => {
         if (!msg) return [];

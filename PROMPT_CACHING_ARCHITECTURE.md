@@ -3,7 +3,7 @@
 This document explains the complete design and implementation of the prompt caching stack in SillyTavern, focusing on the three interacting systems:
 
 1) First Anchor Context Reconstruction (1h TTL refreshed on use)
-2) Megaprompt sealing/compaction (~40–50 turns) with a stable cache_control breakpoint
+2) Megaprompt sealing/compaction (default threshold 60 turns) with a stable cache_control breakpoint
 3) Custom caching-at-depth for Claude, including the OpenRouter path
 
 It also details the order of operations, edge cases (rewinds, trailing systems), Anthropic’s breakpoint limits, and OpenRouter-specific behavior.
@@ -84,7 +84,7 @@ Entry point and timing:
 
 Key configuration:
 - claude.megaprompt.enabled (boolean)
-- claude.megaprompt.turnMultiple (default ~50; tests use 4)
+- claude.megaprompt.turnMultiple (default 60; tests may use smaller, e.g., 4)
 - claude.megaprompt.minLiveTailTurns (default 10; tests use 2)
 - claude.extendedTTL (true => 1h; false => 5m)
 - claude.cachingAtDepth (feeds “tail size” derivation)
@@ -125,23 +125,19 @@ Key entry points:
 
 Shared rules and configuration:
 - stripClaudeCacheBreakpoints(messages) is always run first to remove stale cache_control blocks, avoiding breakpoint overflow
-- claude.maxAnchors (default 2) = message-anchors budget; 1 additional anchor is reserved for system prompt caching (total ≤ 3)
-- claude.anchorSpacingBlocks (default 18) ≈ 20-block spacing window for anchors (block = one content part)
+- claude.maxAnchors (default 3) = message-anchors budget; 1 additional anchor is reserved for system prompt caching (total ≤ 4 overall)
+- claude.anchorSpacingBlocks (default 20) = fixed spacing window for anchors (block = one content part)
 - claude.extendedTTL toggles cache TTL between 5m and 1h
 - Depth semantics: “nth user from the end”, where n=0 is the most recent user message; assistant prefill is skipped until first user is seen
+- Backward coverage: Anthropic anchors cache the prefix up to the anchor; we do not pre-anchor the sealed megaprompt — spacing anchors cover it when within W
 
-Sealed message priority:
-- If a sealed megaprompt exists, it gets the first anchor (counts against MAX_ANCHORS)
+Phase 1 – spacing anchors (fixed W‑multiples):
+- Treat spacing as fixed thresholds at W, 2W, 3W (W = claude.anchorSpacingBlocks)
+- For each threshold crossed, place an anchor at the last user at/before the threshold; if none, anchor the current non‑user (warn)
 
-Phase 1 – spacing anchors:
-- Iterate forward, counting content-blocks since last anchor
-- When the spacing window (≈18–20 blocks) is reached, retroactively anchor the last seen user within the window
-- If no user occurred in the window, anchor the current non-user message as a fallback (warn)
-
-Phase 2 – depth anchor:
-- If not over budget and within the final window, attempt to anchor the target user at cachingAtDepth
-- Place the anchor only if it keeps spacing ≤ anchorSpacingBlocks relative to prior anchors
-- If MAX_ANCHORS is already reached, retarget the most recent anchor backward to the desired target provided spacing to the previous anchor remains valid
+Phase 2 – optional tail‑depth anchor:
+- If budget remains (anchorsPlaced < MAX_ANCHORS) and the tail has ≥ n+1 users after the last anchor, place one “floating” depth anchor on the nth user from the tail
+- No retargeting and no spacing adjustments; if budget is exhausted or tail insufficient, skip
 
 Phase 3 – diagnostics:
 - If total content blocks exceed MAX_ANCHORS × anchorSpacingBlocks, log a warning that parts of the prompt may be uncached
@@ -161,7 +157,7 @@ OpenRouter specifics:
 - First Anchor Reconstruction runs first so later stages act on the reconstructed, stable long-tail window (and TTL refresh happens on use)
 - Megaprompt compaction runs next to seal archival content into a fixed user message; this produces a durable _megapromptSealed marker
 - Provider-specific conversions (MERGE/convert) happen after, and the sealed cache_control is re-attached during Claude conversion
-- Anchoring (caching-at-depth) runs last, and begins with a pre-pass that strips any stale cache_control anchors; it prioritizes the sealed chunk, then spacing anchors, then the depth anchor
+- Anchoring (caching-at-depth) runs last, and begins with a pre-pass that strips any stale cache_control anchors; then applies fixed‑multiple spacing (W, 2W, 3W) and an optional tail‑depth anchor if budget remains
 - System prompt caching is applied in the provider-specific path (Anthropic or OpenRouter), consuming one of the 4 total breakpoints available at Anthropic
 
 
@@ -177,7 +173,7 @@ sequenceDiagram
   Note over S: 1) FirstAnchor: reconstruct sys + lynchpin + trailingSys
   Note over S: 2) Megaprompt: seal archival UA to single user
   Note over S: 3) Convert (Claude Messages API)
-  Note over S: 4) Anchors: strip stale, pre-anchor sealed, spacing, depth
+  Note over S: 4) Anchors: strip stale; spacing at W,2W,3W; optional depth if budget remains
   Note over S: 5) System prompt cache (if enabled)
 
   S->>A: messages + cache_control
@@ -195,7 +191,7 @@ sequenceDiagram
   Note over S: 1) FirstAnchor
   Note over S: 2) Megaprompt
   Note over S: 3) Post-process (MERGE/SEMI/STRICT) as configured
-  Note over S: 4) Anchors (OpenRouter path): strip stale, sealed, spacing, depth
+  Note over S: 4) Anchors (OpenRouter path): strip stale; spacing at W,2W,3W; optional depth if budget remains
   Note over S: 5) System prompt cache (tag last leading system)
 
   S->>O: messages + cache_control
@@ -211,7 +207,7 @@ sequenceDiagram
 - Tool messages: Excluded from sealed text; preserved in the live tail, in original order
 - Prefill assistant: Depth search for “nth user from end” skips assistant prefills until after the first user message
 - Stale anchors: All anchoring functions begin by stripClaudeCacheBreakpoints(messages) to avoid exceeding Anthropic’s breakpoint limit
-- Breakpoint limit: With 1 system + MAX_ANCHORS (default 2) message anchors and the sealed message consuming one of the message anchors, total anchors remain ≤ 3 (< 4 Anthropic max)
+- Breakpoint limit: With 1 system + up to MAX_ANCHORS (default 3) message anchors, total anchors remain ≤ 4 (Anthropic max)
 - Stability: Sealed megaprompt remains byte-stable across turns until the next complete multiple threshold is crossed
 - Overbudget context: If total blocks exceed MAX_ANCHORS × spacing, a warning is logged; anchoring still proceeds conservatively
 
@@ -221,8 +217,8 @@ sequenceDiagram
 - claude.firstAnchorCaching.enabled / ttlSeconds / allowRewind
 - claude.megaprompt.enabled / turnMultiple / minLiveTailTurns
 - claude.cachingAtDepth (>= 0 to enable anchoring) 
-- claude.maxAnchors (message anchors budget; default 2)
-- claude.anchorSpacingBlocks (default 18 ≈ 20)
+- claude.maxAnchors (message anchors budget; default 3)
+- claude.anchorSpacingBlocks (default 20)
 - claude.extendedTTL (true = 1h; false = 5m)
 - claude.enableSystemPromptCache (true to tag system prompt)
 
