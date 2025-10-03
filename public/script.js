@@ -9110,6 +9110,93 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
 }
 
 /**
+ * Clones a group or character chat.
+ * If destination name exists, the server will auto-increment.
+ * @param {object} param Parameters for cloning chat
+ * @param {string} [param.characterId] Character ID to clone chat for
+ * @param {string} [param.groupId] Group ID to clone chat for
+ * @param {string} param.oldFileName Source chat name (no JSONL extension)
+ * @param {string} param.newFileName Destination chat name (no JSONL extension)
+ * @param {boolean} [param.loader=true] Whether to show loader during the operation
+ */
+export async function cloneGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName, loader = true }) {
+    try {
+        loader && showLoader();
+
+        const body = {
+            is_group: !!groupId,
+            avatar_url: characters[characterId]?.avatar,
+            original_file: `${oldFileName}.jsonl`,
+            cloned_file: `${newFileName.trim()}.jsonl`,
+        };
+
+        const response = await fetch('/api/chats/clone', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            headers: getRequestHeaders(),
+        });
+
+        if (!response.ok) {
+            throw new Error('Unsuccessful request.');
+        }
+
+        const data = await response.json();
+        if (data.error) {
+            throw new Error('Server returned an error.');
+        }
+
+        // If server sanitized/auto-incremented the name, use it
+        if (data.sanitizedFileName) {
+            newFileName = data.sanitizedFileName;
+        }
+
+        if (groupId) {
+            const group = groups.find(x => x.id === groupId);
+            if (group) {
+                if (typeof group.past_metadata !== 'object') {
+                    group.past_metadata = {};
+                }
+                if (!Array.isArray(group.chats)) {
+                    group.chats = [];
+                }
+                group.chats.push(newFileName);
+                group.past_metadata[newFileName] = Object.assign({}, group.past_metadata[oldFileName] || {});
+                await editGroup(groupId, true, true);
+            }
+        }
+
+        // Refresh current chat metadata/listing if needed
+        const currentChatId = getCurrentChatId();
+        if (currentChatId) {
+            await reloadCurrentChat();
+        }
+    } catch (err) {
+        console.error('Clone chat error:', err);
+        loader && hideLoader();
+        await delay(500);
+        await callGenericPopup(t`An error has occurred. Chat was not cloned.`, POPUP_TYPE.TEXT);
+    } finally {
+        loader && hideLoader();
+    }
+}
+
+/**
+ * Clones the currently selected chat.
+ * @param {string} oldFileName Source chat name (no JSONL extension)
+ * @param {string} newName Destination chat name (no JSONL extension)
+ */
+export async function cloneChat(oldFileName, newName) {
+    return await cloneGroupOrCharacterChat({
+        characterId: this_chid,
+        groupId: selected_group,
+        oldFileName: oldFileName,
+        newFileName: newName,
+        loader: true,
+    });
+}
+
+
+/**
  * Renames the currently selected chat.
  * @param {string} oldFileName Old name of the chat (no JSONL extension)
  * @param {string} newName New name for the chat (no JSONL extension)
@@ -9786,6 +9873,28 @@ jQuery(async function () {
     $('#form_create').on('submit', (e) => createOrEditCharacter(e.originalEvent));
 
     $('#delete_button').on('click', async function () {
+
+    $(document).on('click', '.cloneChatButton', async function (e) {
+        e.stopPropagation();
+        const oldFileNameFull = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
+        const oldFileName = oldFileNameFull.replace('.jsonl', '');
+
+        const defaultName = `${oldFileName} - Copy`;
+        const popupText = await renderTemplateAsync('chatClone');
+        const newName = await callGenericPopup(popupText, POPUP_TYPE.INPUT, defaultName);
+
+        if (!newName || typeof newName !== 'string') {
+            console.log('no new name found, aborting clone');
+            return;
+        }
+
+        await cloneChat(oldFileName, newName);
+
+        await delay(250);
+        $('#option_select_chat').trigger('click');
+        $('#options').hide();
+    });
+
         if (this_chid === undefined || !characters[this_chid]) {
             toastr.warning('No character selected.');
             return;

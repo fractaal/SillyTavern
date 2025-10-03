@@ -516,6 +516,65 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
     }
 });
 
+router.post('/clone', validateAvatarUrlMiddleware, async function (request, response) {
+    try {
+        if (!request.body || !request.body.original_file || !request.body.cloned_file) {
+            return response.sendStatus(400);
+        }
+
+        const pathToFolder = request.body.is_group
+            ? request.user.directories.groupChats
+            : path.join(request.user.directories.chats, String(request.body.avatar_url).replace('.png', ''));
+
+        const pathToOriginalFile = path.join(pathToFolder, sanitize(request.body.original_file));
+        let pathToClonedFile = path.join(pathToFolder, sanitize(request.body.cloned_file));
+
+        if (!fs.existsSync(pathToOriginalFile)) {
+            console.error('Source file does not exist:', pathToOriginalFile);
+            return response.status(400).send({ error: true });
+        }
+
+        // Auto-increment destination name if it already exists
+        const dir = path.dirname(pathToClonedFile);
+        const ext = path.extname(pathToClonedFile) || '.jsonl';
+        const base = path.parse(pathToClonedFile).name;
+
+        function makeCandidate(nameBase, i) {
+            if (!i || i === 1) return path.join(dir, sanitize(`${nameBase}${ext}`));
+            // Prefer " - Copy N" if the base already ends with " - Copy"; else append " (${i})"
+            const copyMatch = nameBase.match(/^(.*?)(?:\s-\sCopy(?:\s(\d+))?)$/);
+            if (copyMatch) {
+                const stem = copyMatch[1];
+                return path.join(dir, sanitize(`${stem} - Copy ${i}${ext}`));
+            }
+            return path.join(dir, sanitize(`${nameBase} (${i})${ext}`));
+        }
+
+        let candidatePath = pathToClonedFile;
+        let i = 1;
+        while (fs.existsSync(candidatePath)) {
+            i += 1;
+            // If the requested base already equals the original, start with Copy 2
+            candidatePath = makeCandidate(base, i);
+            if (i > 10_000) {
+                console.error('Aborting clone due to excessive attempts at unique naming');
+                return response.status(500).send({ error: true });
+            }
+        }
+
+        pathToClonedFile = candidatePath;
+
+        fs.copyFileSync(pathToOriginalFile, pathToClonedFile);
+        console.info('Successfully cloned chat file to:', pathToClonedFile);
+        const sanitizedFileName = path.parse(pathToClonedFile).name;
+        return response.send({ ok: true, sanitizedFileName });
+    } catch (error) {
+        console.error('Error cloning chat file:', error);
+        return response.status(500).send({ error: true });
+    }
+});
+
+
 router.post('/delete', validateAvatarUrlMiddleware, function (request, response) {
     const dirName = String(request.body.avatar_url).replace('.png', '');
     const fileName = String(request.body.chatfile);
