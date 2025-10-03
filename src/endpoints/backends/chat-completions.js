@@ -2177,7 +2177,7 @@ router.post('/generate', function (request, response) {
 
     // Compact, formatted context preview for quick verification
     try {
-        const logLines = buildContextPreviewLines({ requestBody, isTextCompletion, previewLen: getConfigValue('contextPreview.previewLen', 20, 'number') });
+        const logLines = buildContextPreviewLines({ requestBody, isTextCompletion, previewLen: getConfigValue('contextPreview.previewLen', 20, 'number'), trackNeighbors: getConfigValue('contextPreview.trackNeighbors', true, 'boolean') });
         if (logLines.length) {
             console.debug(logLines.join('\n'));
         }
