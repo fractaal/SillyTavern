@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getConfigValue, tryParse, color } from './util.js';
+import { getConfigValue, tryParse } from './util.js';
 
 const PROMPT_PLACEHOLDER = getConfigValue('promptPlaceholder', 'Let\'s get started.');
 
@@ -299,21 +299,6 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
             });
         }
 
-        // If this message was the sealed megaprompt, ensure the LAST content part carries cache_control
-        if (message._megapromptSealed && Array.isArray(message.content)) {
-            const ttl = message._megapromptSealed.ttl || (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m');
-            // Find the last text part; if none, fall back to the last part
-            let idx = -1;
-            for (let i = message.content.length - 1; i >= 0; i--) {
-                if (message.content[i] && message.content[i].type === 'text') { idx = i; break; }
-            }
-            if (idx === -1) idx = message.content.length - 1;
-            if (idx >= 0 && message.content[idx]) {
-                message.content[idx].cache_control = { type: 'ephemeral', ttl };
-            }
-        }
-
-
         // Remove offending properties
         delete message.name;
         delete message.tool_calls;
@@ -381,116 +366,6 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
     }
 
     return { messages: mergedMessages, systemPrompt: systemPrompt };
-}
-
-/**
- * Pre-pass compaction for Claude: seal archival UA turns into a single cached user message
- * and leave a live, editable tail in native form. Tools are excluded from the sealed text.
- *
- * Shape after compaction (if enabled and triggered):
- *   [ sealedMegaprompt(user, single text block) ] + [ live tail UA messages ]
- * No middle region: any leftover beyond the last multiple is absorbed by the live tail.
- *
- * @param {object[]} messages Claude Messages API shape (no leading system here)
- * @param {number} cachingAtDepth Configured cachingAtDepth (>=0 to enable derivation)
- * @param {{ turnMultiple?: number, minLiveTailTurns?: number, ttl?: string, enabled?: boolean }} [opts]
- * @returns {object[]} New messages array (compacted) or original array if not applicable
- */
-export function applyMegapromptCompaction(messages, cachingAtDepth, opts = {}) {
-    try {
-        const enabled = opts.enabled ?? getConfigValue('claude.megaprompt.enabled', false, 'boolean');
-        if (!enabled) return messages;
-        if (!Array.isArray(messages) || messages.length === 0) return messages;
-
-        const turnMultiple = Math.max(1, Number(getConfigValue('claude.megaprompt.turnMultiple', opts.turnMultiple ?? 60, 'number')) || 60);
-        const minTailCfg = Number(getConfigValue('claude.megaprompt.minLiveTailTurns', opts.minLiveTailTurns ?? 10, 'number')) || 10;
-        const ttl = String(opts.ttl ?? (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m'));
-
-        // Build a list of indices for UA messages and extract their text previews for sealing
-        /** @type {number[]} */
-        const uaIdx = [];
-        for (let i = 0; i < messages.length; i++) {
-            const m = messages[i];
-            if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
-            uaIdx.push(i);
-        }
-        if (uaIdx.length === 0) return messages;
-
-        // Derive live tail size from cachingAtDepth
-        const baseTailTurns = Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0
-            ? Math.max(2 * cachingAtDepth, minTailCfg)
-            : minTailCfg;
-
-        const archivalTurns = Math.max(0, uaIdx.length - baseTailTurns);
-        if (archivalTurns < turnMultiple) {
-            // Not enough archival history to seal yet
-            return messages;
-        }
-
-        // We only seal up to the last completed multiple to keep the sealed bytes stable between requests
-        const lastMultiple = Math.floor(archivalTurns / turnMultiple) * turnMultiple;
-        if (lastMultiple <= 0) return messages;
-
-        // Effective tail must absorb the leftover beyond the last multiple to avoid any middle region,
-        // i.e., it includes both the configured base tail and the leftover archival residue.
-        const leftoverBeyondMultiple = archivalTurns - lastMultiple; // 0..(turnMultiple-1)
-        const effectiveTailTurns = baseTailTurns + leftoverBeyondMultiple;
-
-        // Compute the slice boundaries in UA space
-        const sealedUaCount = lastMultiple; // number of UA turns to include in the sealed text
-        const tailUaCount = Math.min(uaIdx.length, effectiveTailTurns);
-
-        // Map sealed UA turns back to message indices and collect deterministic text
-        const sealedMsgIdx = uaIdx.slice(0, sealedUaCount);
-        const tailMsgIdx = uaIdx.slice(uaIdx.length - tailUaCount);
-
-        const getTextFromMessage = (msg) => {
-            if (!msg) return '';
-            if (typeof msg.content === 'string') return msg.content;
-            if (Array.isArray(msg.content)) {
-                return msg.content
-                    .filter(p => p && p.type === 'text' && typeof p.text === 'string')
-                    .map(p => p.text)
-                    .join('\n\n');
-            }
-            return '';
-        };
-
-        // Build sealed transcript text (deterministic; no timestamps or ids)
-        // let sealedText = `Earlier transcript (sealed; turns 1–${sealedUaCount}).`;
-        let sealedText = '';
-        for (const idx of sealedMsgIdx) {
-            const m = messages[idx];
-            const roleLabel = m.role === 'assistant' ? 'Assistant' : 'User';
-            const text = getTextFromMessage(m).trim();
-            if (!text) continue;
-            sealedText += `\n\n${text}`;
-        }
-        if (!sealedText) return messages; // nothing meaningful to seal
-
-        // Compose sealed message (single text block)
-        const sealedMegapromptMsg = {
-            role: 'user',
-            content: [{ type: 'text', text: sealedText, cache_control: { type: 'ephemeral', ttl } }],
-            // Durable marker to re-attach cache_control after post-processing merges
-            _megapromptSealed: { ttl },
-        };
-
-        // Final assembly: [sealed] + [live tail messages from the first tail UA index to end]
-        // Keep the live tail intact in original order (including potential tool messages)
-        const compacted = [];
-        compacted.push(sealedMegapromptMsg);
-
-        const tailStartIdx = Math.min(...tailMsgIdx);
-        for (let i = tailStartIdx; i < messages.length; i++) {
-            compacted.push(messages[i]);
-        }
-
-        return compacted;
-    } catch (e) {
-        console.warn('[Megaprompt] Compaction failed; falling back to original messages:', e);
-        return messages;
-    }
 }
 
 /**
@@ -1056,324 +931,86 @@ export function convertTextCompletionPrompt(messages) {
 }
 
 /**
- * Strip any existing Anthropic cache_control breakpoints from message content blocks.
- * Use this as a pre-pass to avoid exceeding the provider's breakpoint limit when
- * old anchors linger (e.g., when prompt post-processing is disabled).
- * Mutates the given messages array in place.
- * @param {object[]} messages Claude Messages API-shaped messages
- */
-export function stripClaudeCacheBreakpoints(messages) {
-    if (!Array.isArray(messages)) return;
-    const preAnchorSealed = getConfigValue('claude.megaprompt.preAnchorSealed', false, 'boolean');
-    for (const msg of messages) {
-        const content = msg?.content;
-        if (!Array.isArray(content)) continue;
-
-        // If opted-in, preserve a single cache_control on the LAST part of the sealed megaprompt
-        if (preAnchorSealed && msg?._megapromptSealed) {
-            // First remove any lingering cache_control from all parts
-            for (const b of content) {
-                if (b && b.cache_control) delete b.cache_control;
-            }
-            // Re-apply cache_control to the last text part (or last part if no text parts)
-            let idx = -1;
-            for (let i = content.length - 1; i >= 0; i--) {
-                if (content[i] && content[i].type === 'text') { idx = i; break; }
-            }
-            if (idx === -1 && content.length > 0) idx = content.length - 1;
-            if (idx !== -1 && content[idx]) {
-                const ttl = msg._megapromptSealed.ttl || (getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m');
-                content[idx].cache_control = { type: 'ephemeral', ttl };
-            }
-            continue; // Skip general stripping for sealed message
-        }
-
-        // Default behavior: strip all cache_control
-        for (const b of content) {
-            if (b && b.cache_control) delete b.cache_control;
-        }
-    }
-}
-
-
-/**
- * Append cache_control anchors for Claude messages.
- * Updated semantics:
- * - Primary anchor: nth user message from the end (cachingAtDepth with 0 = most recent user)
- * - Spacing guarantee: ensure each subsequent anchor is ≤ ~20 content blocks from the previous by retroactively
- *   anchoring the last seen user message within that window.
- * - Fallback: if no user message exists within the last ~20 blocks, place the anchor on the current non-user message
- *   and log a WARN, then continue.
- * Directly mutates the messages array.
- * @param {any[]} messages Messages to modify (Claude Messages API shape)
- * @param {number} cachingAtDepth Nth user message from the end to anchor (0 = last user)
- * @param {string} ttl TTL value (e.g., '5m' or '1h')
+ * Append cache_control object to a Claude messages at depth. Directly modifies the messages array.
+ * @param {any[]} messages Messages to modify
+ * @param {number} cachingAtDepth Depth at which caching is supposed to occur
+ * @param {string} ttl TTL value
  */
 export function cachingAtDepthForClaude(messages, cachingAtDepth, ttl) {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    // Pre-pass: wipe any stale cache_control anchors to avoid exceeding limits
-    stripClaudeCacheBreakpoints(messages);
+    let passedThePrefill = false;
+    let depth = 0;
+    let previousRoleName = '';
 
-
-
-    // New anchoring policy: fixed W-multiples + optional tail-depth if budget remains; no pre-anchoring sealed
-    // Config defaults aligned to: M=3, W=20
-    let MAX_ANCHORS = getConfigValue('claude.maxAnchors', 3, 'number');
-    const ANCHOR_SPACING_BLOCKS = getConfigValue('claude.anchorSpacingBlocks', 20, 'number');
-
-    // If we pre-anchor the sealed megaprompt, reduce the remaining message-anchor budget by 1
-    const preAnchorSealed = getConfigValue('claude.megaprompt.preAnchorSealed', false, 'boolean');
-    if (preAnchorSealed && messages.some(m => m && m._megapromptSealed)) {
-        MAX_ANCHORS = Math.max(0, Number(MAX_ANCHORS) - 1);
-    }
-
-    const countBlocks = (msg) => Array.isArray(msg?.content) ? msg.content.length : 0;
-
-    const setCacheOnUserMessage = (msg) => {
-        if (!msg || msg.role !== 'user') return false;
-        const content = Array.isArray(msg.content) ? msg.content : [];
-        if (content.length === 0) return false;
-        let idx = -1;
-        for (let i = content.length - 1; i >= 0; i--) {
-            if (content[i] && content[i].type === 'text') { idx = i; break; }
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (!passedThePrefill && messages[i].role === 'assistant') {
+            continue;
         }
-        if (idx === -1) idx = content.length - 1;
-        if (!content[idx]) return false;
-        content[idx].cache_control = { type: 'ephemeral', ttl };
-        return true;
-    };
 
-    const setCacheOnAnyMessage = (msg) => {
-        const content = Array.isArray(msg?.content) ? msg.content : [];
-        if (content.length === 0) return false;
-        let idx = -1;
-        for (let i = content.length - 1; i >= 0; i--) {
-            if (content[i] && content[i].type === 'text') { idx = i; break; }
-        }
-        if (idx === -1) idx = content.length - 1;
-        if (!content[idx]) return false;
-        content[idx].cache_control = { type: 'ephemeral', ttl };
-        return true;
-    };
+        passedThePrefill = true;
 
-    // Diagnostics: compute capacity and budget status
-    const totalBlocks = messages.reduce((sum, m) => sum + countBlocks(m), 0);
-    const capacity = MAX_ANCHORS * ANCHOR_SPACING_BLOCKS;
-    const overbudget = totalBlocks > capacity;
-
-    // Step 1: place anchors at W, 2W, 3W from the start (backward coverage)
-    let anchorsPlaced = 0;
-    let cumulativeBlocks = 0;
-    let nextThreshold = ANCHOR_SPACING_BLOCKS;
-    let lastUserInWindowIndex = null;
-    let lastAnchorIndex = -1;
-
-    for (let i = 0; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
-        const msg = messages[i];
-        cumulativeBlocks += countBlocks(msg);
-        if (msg?.role === 'user') lastUserInWindowIndex = i;
-
-        while (cumulativeBlocks >= nextThreshold && anchorsPlaced < MAX_ANCHORS) {
-            const idx = (lastUserInWindowIndex != null) ? lastUserInWindowIndex : i;
-            const target = messages[idx];
-            if (target?.role === 'user') {
-                if (setCacheOnUserMessage(target)) {
-                    anchorsPlaced++;
-                    lastAnchorIndex = idx;
-                }
-            } else {
-                if (setCacheOnAnyMessage(target)) {
-                    console.warn(color.yellow('[Claude caching] No user within window; anchoring on non-user message.'));
-                    anchorsPlaced++;
-                    lastAnchorIndex = idx;
-                }
+        if (messages[i].role !== previousRoleName) {
+            if (depth === cachingAtDepth || depth === cachingAtDepth + 2) {
+                const content = messages[i].content;
+                content[content.length - 1].cache_control = { type: 'ephemeral', ttl: ttl };
             }
-            nextThreshold += ANCHOR_SPACING_BLOCKS;
-            lastUserInWindowIndex = null; // reset for the next window
+
+            if (depth === cachingAtDepth + 2) {
+                break;
+            }
+
+            depth += 1;
+            previousRoleName = messages[i].role;
         }
     }
-
-    // Step 2: optional floating depth anchor if under budget and tail has >= n+1 users
-    if (anchorsPlaced < MAX_ANCHORS && Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0) {
-        // Find nth user from the end (skipping assistant prefill)
-        let passedPrefill = false; let seen = 0; let targetUser = null; let targetIdx = -1;
-        for (let i = messages.length - 1; i >= 0; i--) {
-            const m = messages[i];
-            if (!passedPrefill && m.role === 'assistant') continue;
-            passedPrefill = true;
-            if (m.role === 'user') {
-                if (seen === cachingAtDepth) { targetUser = m; targetIdx = i; break; }
-                seen++;
-            }
-        }
-        if (targetUser) {
-            // Validate the tail has at least n+1 users after the last anchor
-            let tailUsers = 0;
-            for (let i = lastAnchorIndex + 1; i < messages.length; i++) {
-                if (messages[i]?.role === 'user') tailUsers++;
-            }
-            if (tailUsers >= cachingAtDepth + 1) {
-                if (setCacheOnUserMessage(targetUser)) {
-                    anchorsPlaced++;
-                    lastAnchorIndex = targetIdx;
-                }
-            }
-        }
-    }
-
-    // Phase 3: diagnostics
-    if (overbudget) {
-        console.warn(color.yellow(`[Claude caching] Context exceeds ${MAX_ANCHORS}x${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
-    }
-
-    return;
 }
-
-
 
 /**
- * Append cache_control anchors for Claude via OpenRouter (Chat Completions-style messages).
- * Semantics mirror cachingAtDepthForClaude. Content may be string or array; we only convert to array when tagging.
- * Directly mutates the messages array.
+ * Append cache_control headers to an OpenRouter request at depth. Directly modifies the
+ * messages array.
  * @param {object[]} messages Array of messages
+ * @param {number} cachingAtDepth Depth at which caching is supposed to occur
  * @param {string} ttl TTL value
-    */
-
+ */
 export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl) {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    // Pre-pass: wipe any stale cache_control anchors to avoid exceeding limits
-    stripClaudeCacheBreakpoints(messages);
-
-
-    // New anchoring policy for OpenRouter: fixed W-multiples + optional tail-depth; no pre-anchoring sealed
-    let MAX_ANCHORS = getConfigValue('claude.maxAnchors', 3, 'number');
-    const ANCHOR_SPACING_BLOCKS = getConfigValue('claude.anchorSpacingBlocks', 20, 'number');
-
-    // If we pre-anchor the sealed megaprompt, reduce the remaining message-anchor budget by 1
-    const preAnchorSealed = getConfigValue('claude.megaprompt.preAnchorSealed', false, 'boolean');
-    if (preAnchorSealed && messages.some(m => m && m._megapromptSealed)) {
-        MAX_ANCHORS = Math.max(0, Number(MAX_ANCHORS) - 1);
-    }
-
-    const ensureArrayContent = (msg) => {
-        if (!msg) return [];
-        if (Array.isArray(msg.content)) return msg.content;
-        const text = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
-        msg.content = [{ type: 'text', text }];
-        return msg.content;
-    };
-
-    const countBlocks = (msg) => {
-        if (!msg) return 0;
-        if (Array.isArray(msg.content)) return msg.content.length;
-        if (typeof msg.content === 'string') return msg.content.length > 0 ? 1 : 0;
-        return 0;
-    };
-
-    const setCacheOnUserMessage = (msg) => {
-        if (!msg || msg.role !== 'user') return false;
-        const content = ensureArrayContent(msg);
-        if (content.length === 0) return false;
-        let idx = -1;
-        for (let i = content.length - 1; i >= 0; i--) {
-            if (content[i] && content[i].type === 'text') { idx = i; break; }
+    //caching the prefill is a terrible idea in general
+    let passedThePrefill = false;
+    //depth here is the number of message role switches
+    let depth = 0;
+    let previousRoleName = '';
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (!passedThePrefill && messages[i].role === 'assistant') {
+            continue;
         }
-        if (idx === -1) idx = content.length - 1;
-        content[idx].cache_control = { type: 'ephemeral', ttl };
-        return true;
-    };
 
-    const setCacheOnAnyMessage = (msg) => {
-        const content = ensureArrayContent(msg);
-        if (content.length === 0) return false;
-        let idx = -1;
-        for (let i = content.length - 1; i >= 0; i--) {
-            if (content[i] && content[i].type === 'text') { idx = i; break; }
-        }
-        if (idx === -1) idx = content.length - 1;
-        content[idx].cache_control = { type: 'ephemeral', ttl };
-        return true;
-    };
+        passedThePrefill = true;
 
-    const totalBlocks = messages.reduce((sum, m) => sum + countBlocks(m), 0);
-    const capacity = MAX_ANCHORS * ANCHOR_SPACING_BLOCKS;
-    const overbudget = totalBlocks > capacity;
-
-    // Step 1: anchors at W, 2W, 3W from start
-    let anchorsPlaced = 0;
-    let cumulativeBlocks = 0;
-    let nextThreshold = ANCHOR_SPACING_BLOCKS;
-    let lastUserInWindowIndex = null;
-    let lastAnchorIndex = -1;
-
-    for (let i = 0; i < messages.length && anchorsPlaced < MAX_ANCHORS; i++) {
-        const msg = messages[i];
-        cumulativeBlocks += countBlocks(msg);
-        if (msg?.role === 'user') lastUserInWindowIndex = i;
-
-        while (cumulativeBlocks >= nextThreshold && anchorsPlaced < MAX_ANCHORS) {
-            const idx = (lastUserInWindowIndex != null) ? lastUserInWindowIndex : i;
-            const target = messages[idx];
-            if (target?.role === 'user') {
-                if (setCacheOnUserMessage(target)) {
-                    anchorsPlaced++;
-                    lastAnchorIndex = idx;
-                }
-            } else {
-                if (setCacheOnAnyMessage(target)) {
-                    console.warn(color.yellow('[Claude caching][OpenRouter] No user within window; anchoring on non-user message.'));
-                    anchorsPlaced++;
-                    lastAnchorIndex = idx;
+        if (messages[i].role !== previousRoleName) {
+            if (depth === cachingAtDepth || depth === cachingAtDepth + 2) {
+                const content = messages[i].content;
+                if (typeof content === 'string') {
+                    messages[i].content = [{
+                        type: 'text',
+                        text: content,
+                        cache_control: { type: 'ephemeral', ttl: ttl },
+                    }];
+                } else {
+                    const contentPartCount = content.length;
+                    content[contentPartCount - 1].cache_control = {
+                        type: 'ephemeral',
+                        ttl: ttl,
+                    };
                 }
             }
-            nextThreshold += ANCHOR_SPACING_BLOCKS;
-            lastUserInWindowIndex = null;
+
+            if (depth === cachingAtDepth + 2) {
+                break;
+            }
+
+            depth += 1;
+            previousRoleName = messages[i].role;
         }
     }
-
-    // Step 2: optional tail-depth anchor if under budget and tail has >= n+1 users
-    if (anchorsPlaced < MAX_ANCHORS && Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0) {
-        let passedPrefill = false; let seen = 0; let targetUser = null; let targetIdx = -1;
-        for (let i = messages.length - 1; i >= 0; i--) {
-            const m = messages[i];
-            if (!passedPrefill && m.role === 'assistant') continue;
-            passedPrefill = true;
-            if (m.role === 'user') {
-                if (seen === cachingAtDepth) { targetUser = m; targetIdx = i; break; }
-                seen++;
-            }
-        }
-        if (targetUser) {
-            let tailUsers = 0;
-            for (let i = lastAnchorIndex + 1; i < messages.length; i++) {
-                if (messages[i]?.role === 'user') tailUsers++;
-            }
-            if (tailUsers >= cachingAtDepth + 1) {
-                if (setCacheOnUserMessage(targetUser)) {
-                    anchorsPlaced++;
-                    lastAnchorIndex = targetIdx;
-                }
-            }
-        }
-    }
-
-    /*
-
-
-    if (overbudget) {
-
- d${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
-    }
-
-    */
-
-    return;
 }
-
-
-
-
-
 
 /**
  * Calculate the Claude budget tokens for a given reasoning effort.
