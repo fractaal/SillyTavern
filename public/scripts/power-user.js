@@ -2819,6 +2819,30 @@ async function doDelMode(_, text) {
     return doMesCut(_, range);
 }
 
+/**
+ * Deletes a range of messages using the same 0-based inclusive indexing and range parsing as /hide.
+ * Provides a confirmation popup unless force=true is passed.
+ * Returns the concatenated text of deleted messages to allow manual recovery.
+ * @param {import('./slash-commands/SlashCommand.js').NamedArguments} args
+ * @param {string} value Unnamed argument: message index or range (e.g., "5-10")
+ * @returns {Promise<string>} Deleted messages' text separated by newlines
+ */
+async function doDelRange(args, value) {
+    const range = stringToRange(value, 0, chat.length - 1);
+    if (!range) { toastr.warning('Must provide a valid 0-based message index or range within chat bounds.'); return ''; }
+    const count = (range.end - range.start) + 1;
+    const force = typeof args?.force !== 'undefined' ? isTrueBoolean(args.force) : false;
+    if (!force) {
+        const summary = `Delete messages ${range.start}-${range.end} (${count} message${count !== 1 ? 's' : ''})?\nThis action cannot be undone from the UI.`;
+        const confirmed = await callGenericPopup(summary, POPUP_TYPE.CONFIRM, '', { okButton: 'Delete', cancelButton: 'Cancel' });
+        if (!confirmed) return '';
+    }
+    const deletedText = await doMesCut(args, `${range.start}-${range.end}`);
+    toastr.success(`Deleted ${count} message${count !== 1 ? 's' : ''}: ${range.start}-${range.end}`);
+    return deletedText || '';
+}
+
+
 function doResetPanels() {
     $('#movingUIreset').trigger('click');
     return '';
@@ -4157,6 +4181,7 @@ jQuery(() => {
             return '';
         },
         namedArgumentList: [
+
             SlashCommandNamedArgument.fromProps({
                 name: 'delete',
                 description: 'delete the current chat',
@@ -4223,6 +4248,30 @@ jQuery(() => {
         aliases: [],
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'delrange',
+        callback: doDelRange,
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'message index (starts with 0) or range',
+                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE],
+                isRequired: true,
+                enumProvider: commonEnumProviders.messages(),
+            }),
+        ],
+        namedArgumentList: [
+            SlashCommandNamedArgument.fromProps({
+                name: 'force',
+                description: 'skip confirmation prompt',
+                typeList: [ARGUMENT_TYPE.BOOLEAN],
+                defaultValue: 'false',
+                enumList: commonEnumProviders.boolean('trueFalse')(),
+            }),
+        ],
+        helpString: 'Deletes a range of messages using 0-based inclusive indexing (e.g., /delrange 5-10). Returns the deleted text.',
+        returns: 'The text of the deleted messages.',
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'resetpanels',
         callback: doResetPanels,
         helpString: 'resets UI panels to original state',
@@ -4246,6 +4295,30 @@ jQuery(() => {
         helpString: `
         <div>
             Sets a UI theme by name.
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'delrange',
+        callback: doDelRange,
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'message index (starts with 0) or range',
+                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE],
+                isRequired: true,
+                enumProvider: commonEnumProviders.messages(),
+            }),
+        ],
+        namedArgumentList: [
+            SlashCommandNamedArgument.fromProps({
+                name: 'force',
+                description: 'skip confirmation prompt',
+                typeList: [ARGUMENT_TYPE.BOOLEAN],
+                defaultValue: 'false',
+                enumList: commonEnumProviders.boolean('trueFalse')(),
+            }),
+        ],
+        helpString: 'Deletes a range of messages using 0-based inclusive indexing (e.g., /delrange 5-10). Returns the deleted text.',
+        returns: 'The text of the deleted messages.',
+    }));
+
         </div>
         <div>
             If no theme name is is provided, this will return the currently active theme.
