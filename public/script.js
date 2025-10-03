@@ -9874,26 +9874,6 @@ jQuery(async function () {
 
     $('#delete_button').on('click', async function () {
 
-    $(document).on('click', '.cloneChatButton', async function (e) {
-        e.stopPropagation();
-        const oldFileNameFull = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
-        const oldFileName = oldFileNameFull.replace('.jsonl', '');
-
-        const defaultName = `${oldFileName} - Copy`;
-        const popupText = await renderTemplateAsync('chatClone');
-        const newName = await callGenericPopup(popupText, POPUP_TYPE.INPUT, defaultName);
-
-        if (!newName || typeof newName !== 'string') {
-            console.log('no new name found, aborting clone');
-            return;
-        }
-
-        await cloneChat(oldFileName, newName);
-
-        await delay(250);
-        $('#option_select_chat').trigger('click');
-        $('#options').hide();
-    });
 
         if (this_chid === undefined || !characters[this_chid]) {
             toastr.warning('No character selected.');
@@ -9982,6 +9962,28 @@ jQuery(async function () {
         $('#option_select_chat').trigger('click');
         $('#options').hide();
     });
+
+    $(document).on('click', '.cloneChatButton', async function (e) {
+        e.stopPropagation();
+        const oldFileNameFull = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
+        const oldFileName = oldFileNameFull.replace('.jsonl', '');
+
+        const defaultName = `${oldFileName} - Copy`;
+        const popupText = await renderTemplateAsync('chatClone');
+        const newName = await callGenericPopup(popupText, POPUP_TYPE.INPUT, defaultName);
+
+        if (!newName || typeof newName !== 'string') {
+            console.log('no new name found, aborting clone');
+            return;
+        }
+
+        await cloneChat(oldFileName, newName);
+
+        await delay(250);
+        $('#option_select_chat').trigger('click');
+        $('#options').hide();
+    });
+
 
     $(document).on('click', '.exportChatButton, .exportRawChatButton', async function (e) {
         e.stopPropagation();
