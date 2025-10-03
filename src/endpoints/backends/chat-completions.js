@@ -40,7 +40,6 @@ import {
     postProcessPrompt,
     PROMPT_PROCESSING_TYPE,
     addAssistantPrefix,
-    applyMegapromptCompaction,
 } from '../../prompt-converters.js';
 
 import { readSecret, SECRET_KEYS } from '../secrets.js';
@@ -54,9 +53,6 @@ import {
     getWebTokenizer,
 } from '../tokenizers.js';
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
-import { applyFirstAnchorReconstruction } from '../../first-anchor-cache.js';
-import { buildContextPreviewLines } from '../../context-preview.js';
-
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -66,8 +62,6 @@ const API_COHERE_V2 = 'https://api.cohere.ai/v2';
 const API_PERPLEXITY = 'https://api.perplexity.ai';
 const API_GROQ = 'https://api.groq.com/openai/v1';
 const API_MAKERSUITE = 'https://generativelanguage.googleapis.com';
-
-
 const API_VERTEX_AI = 'https://us-central1-aiplatform.googleapis.com';
 const API_AI21 = 'https://api.ai21.com/studio/v1';
 const API_ELECTRONHUB = 'https://api.electronhub.ai/v1';
@@ -1754,40 +1748,6 @@ router.post('/bias', async function (request, response) {
 router.post('/generate', function (request, response) {
     if (!request.body) return response.status(400).send({ error: true });
 
-    // Optional transparent reconstruction to preserve cache hits under limited context
-    applyFirstAnchorReconstruction(request);
-
-    // Megaprompt compaction: after FirstAnchor reconstruction, before any post-processing
-    try {
-        const isClaudeModel = (/^claude-/.test(request.body.model || '') || /anthropic\/claude-/.test(request.body.model || ''));
-        if (isClaudeModel && getConfigValue('claude.megaprompt.enabled', false, 'boolean') && Array.isArray(request.body.messages) && request.body.messages.length) {
-            // Preserve leading system messages and compact the remainder
-            let leadingSystemCount = 0;
-            for (let i = 0; i < request.body.messages.length; i++) {
-                const msg = request.body.messages[i];
-                if (msg && msg.role === 'system') {
-                    leadingSystemCount++;
-                    continue;
-                }
-                break;
-            }
-            const leadingSystems = request.body.messages.slice(0, leadingSystemCount);
-            const remainder = request.body.messages.slice(leadingSystemCount);
-
-            const cachingAtDepth = getConfigValue('claude.cachingAtDepth', -1, 'number');
-            const compacted = applyMegapromptCompaction(remainder, cachingAtDepth, {
-                turnMultiple: getConfigValue('claude.megaprompt.turnMultiple', 50, 'number'),
-                minLiveTailTurns: getConfigValue('claude.megaprompt.minLiveTailTurns', 10, 'number'),
-                ttl: getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m',
-                enabled: true,
-            });
-
-            request.body.messages = [...leadingSystems, ...compacted];
-        }
-    } catch (e) {
-        console.warn('[Megaprompt] Pre-pass failed; continuing without compaction:', e);
-    }
-
     const postProcessingType = request.body.custom_prompt_post_processing;
     if (Array.isArray(request.body.messages) && postProcessingType) {
         console.info('Applying custom prompt post-processing of type', postProcessingType);
@@ -1898,79 +1858,6 @@ router.post('/generate', function (request, response) {
         const cacheTTL = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';
         if (Array.isArray(request.body.messages) && Number.isInteger(cachingAtDepth) && cachingAtDepth >= 0 && isClaude3or4) {
             cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth, cacheTTL);
-        }
-
-        // Apply system prompt caching for Claude via OpenRouter when enabled in config
-        const enableSystemPromptCache = getConfigValue('claude.enableSystemPromptCache', false, 'boolean');
-        if (enableSystemPromptCache && isClaude3or4 && Array.isArray(request.body.messages) && request.body.messages.length) {
-            console.log(`System prompt caching enabled for Claude model: ${request.body.model}`);
-
-
-            // Tag the last system message in the leading system segment (before the first non-system)
-            let leadingSystemCount = 0;
-            for (let i = 0; i < request.body.messages.length; i++) {
-                const msg = request.body.messages[i];
-                if (msg && msg.role === 'system') {
-                    leadingSystemCount++;
-                    continue;
-                }
-                break;
-            }
-
-            console.log(`Found ${leadingSystemCount} leading system messages`);
-
-            if (leadingSystemCount > 0) {
-                const tagIndex = leadingSystemCount - 1;
-                const sysMsg = request.body.messages[tagIndex];
-
-                console.log(`Tagging system message at index ${tagIndex} for caching`);
-
-                if (typeof sysMsg.content === 'string') {
-                    const truncatedText = sysMsg.content.slice(0, 50) + (sysMsg.content.length > 50 ? '...' : '');
-                    console.log(`Converting string content to array format - (${truncatedText})`);
-
-
-                    sysMsg.content = [{
-                        type: 'text',
-                        text: sysMsg.content,
-                        cache_control: { type: 'ephemeral', ttl: cacheTTL },
-                    }];
-
-                    console.log(`System cache breakpoint is at ${tagIndex} - (${truncatedText})`);
-                } else if (Array.isArray(sysMsg.content) && sysMsg.content.length) {
-                    console.log(`System message content is already array format with ${sysMsg.content.length} parts`);
-
-                    // Prefer tagging the last text block if present, otherwise tag the last part
-                    let partIndex = -1;
-                    for (let j = sysMsg.content.length - 1; j >= 0; j--) {
-                        if (sysMsg.content[j] && sysMsg.content[j].type === 'text') {
-                            partIndex = j;
-                            break;
-                        }
-                    }
-                    const idx = partIndex !== -1 ? partIndex : sysMsg.content.length - 1;
-
-                    console.log(`Tagging content part at index ${idx} (${partIndex !== -1 ? 'text block' : 'last part'})`);
-
-                    sysMsg.content[idx].cache_control = { type: 'ephemeral', ttl: cacheTTL };
-
-                    const truncatedText = sysMsg.content[idx].text ?
-                        sysMsg.content[idx].text.slice(0, 50) + (sysMsg.content[idx].text.length > 50 ? '...' : '') :
-                        '[non-text content]';
-
-                    console.log(`System cache breakpoint is at ${tagIndex} - (${truncatedText})`);
-                }
-            } else {
-                console.log('No leading system messages found for caching');
-            }
-        } else {
-            if (!enableSystemPromptCache) {
-                console.log('System prompt caching is disabled in config');
-            } else if (!isClaude3or4) {
-                console.log('System prompt caching not applied - not a Claude 3/4 model');
-            } else {
-                console.log('System prompt caching not applied - no messages found');
-            }
         }
 
         const isGemini = /google\/gemini/.test(request.body.model);
