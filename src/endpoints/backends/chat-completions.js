@@ -55,6 +55,8 @@ import {
 } from '../tokenizers.js';
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
 import { applyFirstAnchorReconstruction } from '../../first-anchor-cache.js';
+import { buildContextPreviewLines } from '../../context-preview.js';
+
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -1903,7 +1905,7 @@ router.post('/generate', function (request, response) {
         if (enableSystemPromptCache && isClaude3or4 && Array.isArray(request.body.messages) && request.body.messages.length) {
             console.log(`System prompt caching enabled for Claude model: ${request.body.model}`);
 
-            
+
             // Tag the last system message in the leading system segment (before the first non-system)
             let leadingSystemCount = 0;
             for (let i = 0; i < request.body.messages.length; i++) {
@@ -1927,17 +1929,17 @@ router.post('/generate', function (request, response) {
                     const truncatedText = sysMsg.content.slice(0, 50) + (sysMsg.content.length > 50 ? '...' : '');
                     console.log(`Converting string content to array format - (${truncatedText})`);
 
-                    
+
                     sysMsg.content = [{
                         type: 'text',
                         text: sysMsg.content,
                         cache_control: { type: 'ephemeral', ttl: cacheTTL },
                     }];
-                    
+
                     console.log(`System cache breakpoint is at ${tagIndex} - (${truncatedText})`);
                 } else if (Array.isArray(sysMsg.content) && sysMsg.content.length) {
                     console.log(`System message content is already array format with ${sysMsg.content.length} parts`);
-                    
+
                     // Prefer tagging the last text block if present, otherwise tag the last part
                     let partIndex = -1;
                     for (let j = sysMsg.content.length - 1; j >= 0; j--) {
@@ -1947,12 +1949,12 @@ router.post('/generate', function (request, response) {
                         }
                     }
                     const idx = partIndex !== -1 ? partIndex : sysMsg.content.length - 1;
-                    
+
                     console.log(`Tagging content part at index ${idx} (${partIndex !== -1 ? 'text block' : 'last part'})`);
-                    
+
                     sysMsg.content[idx].cache_control = { type: 'ephemeral', ttl: cacheTTL };
 
-                    const truncatedText = sysMsg.content[idx].text ? 
+                    const truncatedText = sysMsg.content[idx].text ?
                         sysMsg.content[idx].text.slice(0, 50) + (sysMsg.content[idx].text.length > 50 ? '...' : '') :
                         '[non-text content]';
 
@@ -2175,85 +2177,9 @@ router.post('/generate', function (request, response) {
 
     // Compact, formatted context preview for quick verification
     try {
-        if (true) {
-            const previewLen = 20;
-
-            const getCacheTTL = (/** @type {any} */ msg) => {
-                try {
-                    if (msg && typeof msg === 'object' && msg.cache_control && typeof msg.cache_control === 'object') {
-                        const t = msg.cache_control.ttl;
-                        if (t) return String(t);
-                    }
-                    const c = msg?.content;
-                    if (Array.isArray(c)) {
-                        for (const p of c) {
-                            if (p && typeof p === 'object' && p.cache_control && typeof p.cache_control === 'object') {
-                                const t = p.cache_control.ttl;
-                                if (t) return String(t);
-                            }
-                        }
-                    } else if (c && typeof c === 'object') {
-                        if (c.cache_control && typeof c.cache_control === 'object' && c.cache_control.ttl) {
-                            return String(c.cache_control.ttl);
-                        }
-                    }
-                } catch {}
-                return null;
-            };
-
-            const hashContent = (content) => {
-                const str = typeof content === 'string' ? content : JSON.stringify(content);
-                // Simple hash function for unique content identification
-                let hash = 0;
-                for (let i = 0; i < str.length; i++) {
-                    const char = str.charCodeAt(i);
-                    hash = ((hash << 5) - hash) + char;
-                    hash = hash & hash; // Convert to 32-bit integer
-                }
-                return Math.abs(hash).toString(16).slice(0, 6);
-            };
-
-            const createPreview = (text) => {
-                const cleaned = String(text).replace(/\s+/g, ' ').trim();
-                if (cleaned.length <= previewLen * 2 + 6) {
-                    return cleaned;
-                }
-                const start = cleaned.slice(0, previewLen);
-                const end = cleaned.slice(-previewLen);
-                return `${start}... ...${end}`;
-            };
-
-            let logLines = [];
-            if (isTextCompletion) {
-                const prompt = requestBody.prompt ?? '';
-                const preview = createPreview(prompt);
-                const hash = hashContent(prompt);
-                logLines.push(`Sent prompt: ${preview} (${hash})`);
-            } else if (Array.isArray(requestBody.messages)) {
-                const msgs = requestBody.messages;
-                logLines.push(`Sent context (${msgs.length} total messages):`);
-                for (const m of msgs) {
-                    const role = m.role ?? '?';
-                    let text = '';
-                    if (typeof m.content === 'string') {
-                        text = m.content;
-                    } else if (Array.isArray(m.content)) {
-                        const textPart = m.content.find(p => p && (p.type === 'text' || p.type === 'input_text'));
-                        text = textPart?.text ?? '';
-                    } else if (typeof m.content === 'object' && m.content !== null) {
-                        if (m.content.type === 'text' && m.content.text) text = m.content.text;
-                    }
-
-                    const preview = createPreview(text);
-                    const hash = hashContent(text);
-                    const ttl = getCacheTTL(m);
-                    const marker = ttl ? ` (📦 ttl=${ttl})` : '';
-                    logLines.push(`[${msgs.indexOf(m) + 1}] (${role})\t${preview} (${hash})${marker}`);
-                }
-            }
-            if (logLines.length) {
-                console.debug(logLines.join('\n'));
-            }
+        const logLines = buildContextPreviewLines({ requestBody, isTextCompletion, previewLen: getConfigValue('contextPreview.previewLen', 20, 'number') });
+        if (logLines.length) {
+            console.debug(logLines.join('\n'));
         }
     } catch (e) {
         console.warn('Failed to format context preview:', e);
