@@ -65,8 +65,14 @@ export const identityHashForMessage = (_msg) => {
 
     const msg = structuredClone(_msg);
 
-    for (const p of msg.content) {
-        delete p.cache_control;
+    if (Array.isArray(msg?.content)) {
+        for (const p of msg.content) {
+            if (p && typeof p === 'object') {
+                delete p.cache_control;
+            }
+        }
+    } else if (msg?.content && typeof msg.content === 'object') {
+        delete msg.content.cache_control;
     }
 
     return hashContent(msg);
@@ -75,6 +81,8 @@ export const identityHashForMessage = (_msg) => {
 // Global neighbor sanity tracker: remembers first-seen neighbors for each
 // identity hash across the process lifetime.
 const neighborSanityMap = new Map(); // hash -> { left: string|null, right: string|null }
+
+const fieldIdentityMap = new Map();
 
 // Allow external callers (e.g., runner manual mode) to reset neighbor tracking
 export function resetNeighborSanityTracker() {
@@ -98,6 +106,149 @@ export function restoreNeighborSanityTracker(snapshot) {
         neighborSanityMap.set(k, { left: v?.left ?? null, right: v?.right ?? null });
     }
 }
+
+
+
+/**
+ * Generate a stable hash for any JSON-serializable value.
+ * @param {any} value
+ * @returns {string|null}
+ */
+const hashForFieldValue = (value) => {
+    if (value === undefined) {
+        return null;
+    }
+    if (value === null) {
+        return hashContent('null');
+    }
+    const type = typeof value;
+    if (type === 'string') {
+        return hashContent(value);
+    }
+    if (type === 'number' || type === 'boolean' || type === 'bigint') {
+        return hashContent(String(value));
+    }
+    if (type === 'object') {
+        return hashContent(sortKeysDeep(value));
+    }
+    return hashContent(String(value));
+};
+
+const fieldChangeMarker = (key, hash) => {
+    if (!hash) {
+        return '';
+    }
+    const prev = fieldIdentityMap.get(key);
+    if (!prev) {
+        fieldIdentityMap.set(key, hash);
+        return ' (🔷)';
+    }
+    if (prev === hash) {
+        return ' (🟢)';
+    }
+    fieldIdentityMap.set(key, hash);
+    return ' (🔴)';
+};
+
+const previewPrimitive = (value, previewLen) => {
+    if (value === null) {
+        return 'null';
+    }
+    if (value === undefined) {
+        return 'undefined';
+    }
+    if (typeof value === 'string') {
+        return `"${createPreview(value, previewLen)}"`;
+    }
+    return String(value);
+};
+
+const previewArray = (value, previewLen) => {
+    if (!value.length) {
+        return '[]';
+    }
+    const isPrimitiveList = value.length <= 3 && value.every((item) => item === null || ['string', 'number', 'boolean', 'bigint'].includes(typeof item));
+    if (isPrimitiveList) {
+        const parts = value.map((item) => previewPrimitive(item, previewLen));
+        return `[${parts.join(', ')}]`;
+    }
+    const serialized = createPreview(JSON.stringify(sortKeysDeep(value)), previewLen);
+    return `Array(len=${value.length}) ${serialized}`;
+};
+
+const previewObject = (value, previewLen) => {
+    if (!value || typeof value !== 'object') {
+        return previewPrimitive(value, previewLen);
+    }
+    const keys = Object.keys(value).sort();
+    if (!keys.length) {
+        return '{}';
+    }
+    const keyHints = keys.slice(0, 3).join(', ');
+    const hintSuffix = keys.length > 3 ? ', …' : '';
+    const highlightKeys = ['name', 'id', 'type', 'role'];
+    const highlights = highlightKeys
+        .filter((k) => Object.prototype.hasOwnProperty.call(value, k) && (typeof value[k] === 'string' || typeof value[k] === 'number'))
+        .map((k) => `${k}=${previewPrimitive(value[k], previewLen)}`);
+    const serialized = createPreview(JSON.stringify(sortKeysDeep(value)), previewLen);
+    const hint = highlights.length ? highlights.join(' ') : `keys=${keyHints}${hintSuffix}`;
+    return `Object{${hint}} ${serialized}`;
+};
+
+const previewValue = (value, previewLen) => {
+    if (Array.isArray(value)) {
+        return previewArray(value, previewLen);
+    }
+    if (value && typeof value === 'object') {
+        return previewObject(value, previewLen);
+    }
+    return previewPrimitive(value, previewLen);
+};
+
+const buildFieldLines = (requestBody, previewLen) => {
+    if (!requestBody || typeof requestBody !== 'object') {
+        return [];
+    }
+    const lines = [];
+    const seenKeys = new Set();
+    const topLevelKeys = Object.keys(requestBody)
+        .filter((key) => key !== 'messages' && requestBody[key] !== undefined)
+        .sort();
+
+    for (const key of topLevelKeys) {
+        const value = requestBody[key];
+        const hash = hashForFieldValue(value);
+        const marker = fieldChangeMarker(key, hash);
+        const summary = previewValue(value, previewLen);
+        const hashSuffix = hash ? ` (${hash})` : '';
+        lines.push(`${key}: ${summary}${hashSuffix}${marker}`);
+        seenKeys.add(key);
+
+        if (Array.isArray(value) && value.length && value.length <= 5) {
+            value.forEach((item, index) => {
+                if (item === undefined) {
+                    return;
+                }
+                const itemKey = `${key}[${index}]`;
+                const itemHash = hashForFieldValue(item);
+                const itemMarker = fieldChangeMarker(itemKey, itemHash);
+                const itemSummary = previewValue(item, previewLen);
+                const itemHashSuffix = itemHash ? ` (${itemHash})` : '';
+                lines.push(`  [${index}] ${itemSummary}${itemHashSuffix}${itemMarker}`);
+                seenKeys.add(itemKey);
+            });
+        }
+    }
+
+    for (const existingKey of Array.from(fieldIdentityMap.keys())) {
+        if (!seenKeys.has(existingKey)) {
+            fieldIdentityMap.delete(existingKey);
+            lines.push(`Removed field: ${existingKey}`);
+        }
+    }
+
+    return lines;
+};
 
 
 
@@ -135,7 +286,11 @@ export function buildContextPreviewLines({ requestBody, isTextCompletion, previe
     }
 
     const msgs = Array.isArray(requestBody?.messages) ? requestBody.messages : null;
-    if (!msgs) return lines;
+    if (!msgs) {
+        const fieldLines = buildFieldLines(requestBody, previewLen);
+        lines.push(...fieldLines);
+        return lines;
+    }
 
     lines.push(`Sent context (${msgs.length} total messages):`);
 
@@ -183,6 +338,12 @@ export function buildContextPreviewLines({ requestBody, isTextCompletion, previe
         lines.push(`[${i + 1}] ${role}: ${preview} (${hash})${marker}${neighborMarker}${extra}`);
     }
 
+    const fieldLines = buildFieldLines(requestBody, previewLen);
+    if (fieldLines.length) {
+        lines.push('Other request params:');
+        lines.push(...fieldLines);
+    }
+
     return lines;
 }
 
@@ -197,4 +358,3 @@ export function logContextPreview(params) {
         console.debug(lines.join('\n'));
     }
 }
-
