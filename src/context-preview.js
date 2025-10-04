@@ -1,3 +1,5 @@
+import { createHash } from 'crypto';
+
 // Shared utilities for building a compact, formatted preview of a request payload's messages/prompt
 // ESM module
 
@@ -34,15 +36,17 @@ export const getCacheTTL = (msg) => {
  * @param {any} content
  * @returns {string}
  */
+
+/**
+ * Generate a cryptographically secure hash for unique content identification.
+ * Uses SHA-256 and returns the first 8 hex characters for compactness.
+ * @param {any} content
+ * @returns {string}
+ */
 export const hashContent = (content) => {
     const str = typeof content === 'string' ? content : JSON.stringify(content);
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-        const char = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash; // 32-bit int
-    }
-    return Math.abs(hash).toString(16).padStart(8, '0').slice(0, 8);
+    const hash = createHash('sha256').update(str, 'utf8').digest('hex');
+    return hash.slice(0, 16);
 };
 
 // Compute a stable identity hash for a full message object by recursively
@@ -116,7 +120,7 @@ export function restoreNeighborSanityTracker(snapshot) {
  */
 const hashForFieldValue = (value) => {
     if (value === undefined) {
-        return null;
+        return hashContent('undefined');
     }
     if (value === null) {
         return hashContent('null');
@@ -226,9 +230,6 @@ const buildFieldLines = (requestBody, previewLen) => {
 
         if (Array.isArray(value) && value.length && value.length <= 5) {
             value.forEach((item, index) => {
-                if (item === undefined) {
-                    return;
-                }
                 const itemKey = `${key}[${index}]`;
                 const itemHash = hashForFieldValue(item);
                 const itemMarker = fieldChangeMarker(itemKey, itemHash);

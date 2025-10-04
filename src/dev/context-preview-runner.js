@@ -226,7 +226,7 @@ async function main() {
             if (hasAnchor) anchorOrdinalByIndex.set(idx, aNum++);
         }
 
-        const requestBody = { messages: current };
+        const requestBody = { messages: current, test: undefined };
         const logLines = buildContextPreviewLines({
             requestBody,
             isTextCompletion: false,

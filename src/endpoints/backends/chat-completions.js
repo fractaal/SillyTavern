@@ -1851,9 +1851,7 @@ router.post('/generate', function (request, response) {
         };
 
         // Ensure OpenRouter streams include usage in the final event
-        if (request.body.stream) {
-            bodyParams['stream_options'] = { include_usage: true };
-        }
+        bodyParams['stream_options'] = { include_usage: true };
 
         if (request.body.min_p !== undefined) {
             bodyParams['min_p'] = request.body.min_p;
