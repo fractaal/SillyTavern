@@ -212,7 +212,7 @@ const buildFieldLines = (requestBody, previewLen) => {
     const lines = [];
     const seenKeys = new Set();
     const topLevelKeys = Object.keys(requestBody)
-        .filter((key) => key !== 'messages' && requestBody[key] !== undefined)
+        .filter((key) => key !== 'messages')
         .sort();
 
     for (const key of topLevelKeys) {
