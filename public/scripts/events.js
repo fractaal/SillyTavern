@@ -1,6 +1,7 @@
 import { EventEmitter } from '../lib/eventemitter.js';
 
 export const event_types = {
+    APP_INITIALIZED: 'app_initialized',
     APP_READY: 'app_ready',
     EXTRAS_CONNECTED: 'extras_connected',
     MESSAGE_SWIPED: 'message_swiped',
@@ -16,6 +17,8 @@ export const event_types = {
     MORE_MESSAGES_LOADED: 'more_messages_loaded',
     IMPERSONATE_READY: 'impersonate_ready',
     CHAT_CHANGED: 'chat_id_changed',
+    // TODO: Naming convention is inconsistent with other events
+    CHAT_LOADED: 'chatLoaded',
     GENERATION_AFTER_COMMANDS: 'GENERATION_AFTER_COMMANDS',
     GENERATION_STARTED: 'generation_started',
     GENERATION_STOPPED: 'generation_stopped',
@@ -91,7 +94,8 @@ export const event_types = {
     PRESET_RENAMED_BEFORE: 'preset_renamed_before',
     MAIN_API_CHANGED: 'main_api_changed',
     WORLDINFO_ENTRIES_LOADED: 'worldinfo_entries_loaded',
+    WORLDINFO_SCAN_DONE: 'worldinfo_scan_done',
     MEDIA_ATTACHMENT_DELETED: 'media_attachment_deleted',
 };
 
-export const eventSource = new EventEmitter([event_types.APP_READY]);
+export const eventSource = new EventEmitter([event_types.APP_READY, event_types.APP_INITIALIZED]);

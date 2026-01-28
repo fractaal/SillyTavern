@@ -27,7 +27,6 @@ import { oai_settings, openai_setting_names, openai_settings } from './openai.js
 import { POPUP_RESULT, POPUP_TYPE, Popup } from './popup.js';
 import { context_presets, getContextSettings, power_user } from './power-user.js';
 import { reasoning_templates } from './reasoning.js';
-import { getManualPresetSamplers, resetPresetSelectedSamplers, setPresetSamplersState } from './samplerSelect.js';
 import { SlashCommand } from './slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument } from './slash-commands/SlashCommandArgument.js';
 import { enumIcons } from './slash-commands/SlashCommandCommonEnumsProvider.js';
@@ -164,7 +163,7 @@ class PresetManager {
                 const manager = getPresetManager('textgenerationwebui');
                 const name = manager.getSelectedPresetName();
                 const data = manager.getPresetSettings(name);
-                data['name'] = name;
+                data.name = name;
                 return data;
             },
             setData: (data) => {
@@ -653,22 +652,22 @@ class PresetManager {
                     return textgen_settings;
                 case 'context': {
                     const context_preset = getContextSettings();
-                    context_preset['name'] = name || power_user.context.preset;
+                    context_preset.name = name || power_user.context.preset;
                     return context_preset;
                 }
                 case 'instruct': {
                     const instruct_preset = structuredClone(power_user.instruct);
-                    instruct_preset['name'] = name || power_user.instruct.preset;
+                    instruct_preset.name = name || power_user.instruct.preset;
                     return instruct_preset;
                 }
                 case 'sysprompt': {
                     const sysprompt_preset = structuredClone(power_user.sysprompt);
-                    sysprompt_preset['name'] = name || power_user.sysprompt.preset;
+                    sysprompt_preset.name = name || power_user.sysprompt.preset;
                     return sysprompt_preset;
                 }
                 case 'reasoning': {
                     const reasoning_preset = structuredClone(power_user.reasoning);
-                    reasoning_preset['name'] = name || power_user.reasoning.preset;
+                    reasoning_preset.name = name || power_user.reasoning.preset;
                     return reasoning_preset;
                 }
                 default:
@@ -702,6 +701,7 @@ class PresetManager {
             'ollama_model',
             'vllm_model',
             'aphrodite_model',
+            'llamacpp_model',
             'server_urls',
             'type',
             'custom_model',
@@ -727,6 +727,7 @@ class PresetManager {
             'show_hidden',
             'max_additions',
         ];
+        /** @type {Record<string, any>} */
         const settings = Object.assign({}, getSettingsByApiId(this.apiId));
 
         for (const key of filteredKeys) {
@@ -736,8 +737,8 @@ class PresetManager {
         }
 
         if (!this.isAdvancedFormatting() && this.apiId !== 'openai') {
-            settings['genamt'] = amount_gen;
-            settings['max_length'] = max_context;
+            settings.genamt = amount_gen;
+            settings.max_length = max_context;
         }
 
         return settings;
@@ -1072,16 +1073,6 @@ export async function initPresetManager() {
             return;
         }
 
-        if (apiId === 'textgenerationwebui') {
-            const manualSamplersIterable = Object.entries(getManualPresetSamplers(oldName));
-
-            for (const [sampler, value] of manualSamplersIterable) {
-                setPresetSamplersState(sampler, value, newName);
-            }
-
-            await resetPresetSelectedSamplers(oldName, true);
-        }
-
         const successToast = !presetManager.isAdvancedFormatting() ? t`Preset renamed` : t`Template renamed`;
         toastr.success(successToast);
     });
@@ -1125,7 +1116,7 @@ export async function initPresetManager() {
         const fileName = file.name.replace('.json', '').replace('.settings', '');
         const data = await parseJsonFile(file);
         const name = data?.name ?? fileName;
-        data['name'] = name;
+        data.name = name;
 
         await presetManager.savePreset(name, data);
         const successToast = !presetManager.isAdvancedFormatting() ? t`Preset imported` : t`Template imported`;

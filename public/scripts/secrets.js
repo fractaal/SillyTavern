@@ -52,10 +52,12 @@ export const SECRET_KEYS = {
     HUGGINGFACE: 'api_key_huggingface',
     STABILITY: 'api_key_stability',
     CUSTOM_OPENAI_TTS: 'api_key_custom_openai_tts',
+    CHUTES: 'api_key_chutes',
     ELECTRONHUB: 'api_key_electronhub',
     NANOGPT: 'api_key_nanogpt',
     TAVILY: 'api_key_tavily',
     BFL: 'api_key_bfl',
+    COMFY_RUNPOD: 'api_key_comfy_runpod',
     GENERIC: 'api_key_generic',
     DEEPSEEK: 'api_key_deepseek',
     SERPER: 'api_key_serper',
@@ -70,6 +72,10 @@ export const SECRET_KEYS = {
     COMETAPI: 'api_key_cometapi',
     ZAI: 'api_key_zai',
     SILICONFLOW: 'api_key_siliconflow',
+    ELEVENLABS: 'api_key_elevenlabs',
+    POLLINATIONS: 'api_key_pollinations',
+    VOLCENGINE_APP_ID: 'volcengine_app_id',
+    VOLCENGINE_ACCESS_KEY: 'volcengine_access_key',
 };
 
 const FRIENDLY_NAMES = {
@@ -99,6 +105,7 @@ const FRIENDLY_NAMES = {
     [SECRET_KEYS.GROQ]: 'Groq',
     [SECRET_KEYS.FEATHERLESS]: 'Featherless',
     [SECRET_KEYS.HUGGINGFACE]: 'HuggingFace',
+    [SECRET_KEYS.CHUTES]: 'Chutes',
     [SECRET_KEYS.ELECTRONHUB]: 'Electron Hub',
     [SECRET_KEYS.NANOGPT]: 'NanoGPT',
     [SECRET_KEYS.GENERIC]: 'Generic (OpenAI-compatible)',
@@ -109,6 +116,7 @@ const FRIENDLY_NAMES = {
     [SECRET_KEYS.CUSTOM_OPENAI_TTS]: 'Custom OpenAI TTS',
     [SECRET_KEYS.TAVILY]: 'Tavily',
     [SECRET_KEYS.BFL]: 'Black Forest Labs',
+    [SECRET_KEYS.COMFY_RUNPOD]: 'ComfyUI RunPod',
     [SECRET_KEYS.SERPAPI]: 'SerpApi',
     [SECRET_KEYS.SERPER]: 'Serper',
     [SECRET_KEYS.FALAI]: 'FAL.AI',
@@ -128,6 +136,10 @@ const FRIENDLY_NAMES = {
     [SECRET_KEYS.AZURE_OPENAI]: 'Azure OpenAI',
     [SECRET_KEYS.ZAI]: 'Z.AI',
     [SECRET_KEYS.SILICONFLOW]: 'SiliconFlow',
+    [SECRET_KEYS.ELEVENLABS]: 'ElevenLabs TTS',
+    [SECRET_KEYS.POLLINATIONS]: 'Pollinations',
+    [SECRET_KEYS.VOLCENGINE_APP_ID]: 'Volcengine App ID',
+    [SECRET_KEYS.VOLCENGINE_ACCESS_KEY]: 'Volcengine Access Key',
 };
 
 const INPUT_MAP = {
@@ -156,6 +168,7 @@ const INPUT_MAP = {
     [SECRET_KEYS.GROQ]: '#api_key_groq',
     [SECRET_KEYS.FEATHERLESS]: '#api_key_featherless',
     [SECRET_KEYS.HUGGINGFACE]: '#api_key_huggingface',
+    [SECRET_KEYS.CHUTES]: '#api_key_chutes',
     [SECRET_KEYS.ELECTRONHUB]: '#api_key_electronhub',
     [SECRET_KEYS.NANOGPT]: '#api_key_nanogpt',
     [SECRET_KEYS.GENERIC]: '#api_key_generic',
@@ -169,6 +182,8 @@ const INPUT_MAP = {
     [SECRET_KEYS.AZURE_OPENAI]: '#api_key_azure_openai',
     [SECRET_KEYS.ZAI]: '#api_key_zai',
     [SECRET_KEYS.SILICONFLOW]: '#api_key_siliconflow',
+    [SECRET_KEYS.COMFY_RUNPOD]: '#api_key_comfy_runpod',
+    [SECRET_KEYS.POLLINATIONS]: '#api_key_pollinations',
 };
 
 const getLabel = () => moment().format('L LT');
@@ -265,7 +280,7 @@ function getActiveSecretLabel(key) {
 async function viewSecrets() {
     const response = await fetch('/api/secrets/view', {
         method: 'POST',
-        headers: getRequestHeaders(),
+        headers: getRequestHeaders({ omitContentType: true }),
     });
 
     if (response.status == 403) {
@@ -369,7 +384,7 @@ export async function readSecretState() {
     try {
         const response = await fetch('/api/secrets/read', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: getRequestHeaders({ omitContentType: true }),
         });
 
         if (response.ok) {
@@ -567,11 +582,11 @@ async function openKeyManagerDialog(key) {
     template.find('button[data-action="add-secret"]').on('click', async function () {
         let label = '';
         let result = POPUP_RESULT.CANCELLED;
-        const value = await Popup.show.input(t`Add Secret`, t`Enter the secret value (can be empty):`, '', {
+        const value = await Popup.show.input(t`Add Secret`, t`Secret value (can be empty):`, '', {
             customInputs: [{
                 id: 'newSecretLabel',
                 type: 'text',
-                label: t`Enter a label for the secret (optional):`,
+                label: t`Label (optional):`,
             }],
             onClose: popup => {
                 if (popup.result) {
