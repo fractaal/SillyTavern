@@ -1447,18 +1447,30 @@ export function cachingSystemPromptForOpenRouter(messages, ttl = undefined) {
         return;
     }
 
-    // Check if it already has cache_control (at message level)
-    if (systemMessage.cache_control) {
-        return;
-    }
-
     const cacheControl = ttl
         ? { type: 'ephemeral', ttl }
         : { type: 'ephemeral' };
 
+    const ensureTtl = (cacheControlObj) => {
+        if (!cacheControlObj || typeof cacheControlObj !== 'object') {
+            return cacheControl;
+        }
+        if (ttl && !cacheControlObj.ttl) {
+            return { ...cacheControlObj, ttl };
+        }
+        return cacheControlObj;
+    };
+
+    // Message-level cache_control already exists. Keep it, but ensure TTL when provided.
+    if (systemMessage.cache_control) {
+        systemMessage.cache_control = ensureTtl(systemMessage.cache_control);
+        return;
+    }
+
     if (Array.isArray(systemMessage.content)) {
-        const hasExistingCacheControl = systemMessage.content.some(part => part?.cache_control);
-        if (hasExistingCacheControl) {
+        const partWithCacheControl = systemMessage.content.find(part => part?.cache_control);
+        if (partWithCacheControl) {
+            partWithCacheControl.cache_control = ensureTtl(partWithCacheControl.cache_control);
             return;
         }
 

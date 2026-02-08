@@ -13,7 +13,14 @@ import { setConfigFilePath } from '../util.js';
 setConfigFilePath(path.resolve(process.cwd(), 'default/config.yaml'));
 
 // Import after setting env + config path so module init reads the right sources
-const { applyMegapromptCompaction, postProcessPrompt, PROMPT_PROCESSING_TYPE, convertClaudeMessages, cachingAtDepthForOpenRouterClaude } = await import('../prompt-converters.js');
+const {
+  applyMegapromptCompaction,
+  postProcessPrompt,
+  PROMPT_PROCESSING_TYPE,
+  convertClaudeMessages,
+  cachingAtDepthForOpenRouterClaude,
+  cachingSystemPromptForOpenRouter,
+} = await import('../prompt-converters.js');
 
 const msg = (role, content) => ({ role, content });
 const U = (t) => msg('user', t);
@@ -183,6 +190,29 @@ test('[megaprompt][openrouter] places at least one anchor; sealed not required t
     return acc + content.filter((c) => c?.type === 'text' && c?.cache_control).length;
   }, 0);
   assert.ok(anchorCount >= 1, 'expected at least one cache_control anchor after OpenRouter anchoring');
+});
+
+test('[openrouter][system-cache] upgrades existing message-level cache_control with ttl', () => {
+  const msgs = [
+    { role: 'system', content: [{ type: 'text', text: 'SYS' }], cache_control: { type: 'ephemeral' } },
+    U('hello'),
+  ];
+
+  cachingSystemPromptForOpenRouter(msgs, '5m');
+  assert.equal(msgs[0].cache_control?.type, 'ephemeral');
+  assert.equal(msgs[0].cache_control?.ttl, '5m');
+});
+
+test('[openrouter][system-cache] upgrades existing content-level cache_control with ttl', () => {
+  const msgs = [
+    { role: 'system', content: [{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral' } }] },
+    U('hello'),
+  ];
+
+  cachingSystemPromptForOpenRouter(msgs, '5m');
+  const part = msgs[0].content[0];
+  assert.equal(part.cache_control?.type, 'ephemeral');
+  assert.equal(part.cache_control?.ttl, '5m');
 });
 
 

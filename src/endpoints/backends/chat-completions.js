@@ -63,7 +63,6 @@ import {
     getWebTokenizer,
 } from '../tokenizers.js';
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
-import { applyFirstAnchorReconstruction } from '../../first-anchor-cache.js';
 import { buildContextPreviewLines } from '../../context-preview.js';
 
 
@@ -2019,10 +2018,7 @@ router.post('/generate', async function (request, response) {
     try {
         if (!request.body) return response.status(400).send({ error: true });
 
-        // Optional transparent reconstruction to preserve cache hits under limited context
-        applyFirstAnchorReconstruction(request);
-
-        // Megaprompt compaction: after FirstAnchor reconstruction, before any post-processing
+        // Megaprompt compaction: before any prompt post-processing
         try {
             const isClaudeModel = (/^claude-/.test(request.body.model || '') || /anthropic\/claude-/.test(request.body.model || ''));
             if (isClaudeModel && getConfigValue('claude.megaprompt.enabled', false, 'boolean') && Array.isArray(request.body.messages) && request.body.messages.length) {
@@ -2163,28 +2159,63 @@ router.post('/generate', async function (request, response) {
                 };
             }
 
-            const isClaude = /^anthropic\/claude/.test(request.body.model);
+            const cacheTTLForClaude = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';
+            const enableSystemPromptCacheForClaude = getConfigValue('claude.enableSystemPromptCache', false, 'boolean');
+            const cachingAtDepthForClaude = (() => {
+                const value = getConfigValue('claude.cachingAtDepth', -1, 'number');
+                return Number.isInteger(value) && value >= 0 ? value : -1;
+            })();
+            const isClaude = (/^claude-/.test(request.body.model || '') || /anthropic\/claude-/.test(request.body.model || ''));
             const isGemini = /google\/gemini/.test(request.body.model);
             const isCacheableGemini = isGemini && await isOpenRouterModelCacheable(request.body.model);
             const enableGeminiSystemPromptCache = getConfigValue('gemini.enableSystemPromptCache', false, 'boolean');
 
+            const countCacheControls = (messages) => {
+                if (!Array.isArray(messages)) return 0;
+                let count = 0;
+                for (const msg of messages) {
+                    if (msg?.cache_control) count++;
+                    const parts = msg?.content;
+                    if (Array.isArray(parts)) {
+                        for (const part of parts) {
+                            if (part?.cache_control) count++;
+                        }
+                    } else if (parts && typeof parts === 'object' && parts.cache_control) {
+                        count++;
+                    }
+                }
+                return count;
+            };
+
             if (Array.isArray(request.body.messages)) {
+                const cacheControlsBefore = countCacheControls(request.body.messages);
                 embedOpenRouterMedia(request.body.messages, { audio: true, video: true });
                 addOpenRouterSignatures(request.body.messages, request.body.model);
 
                 if (isClaude) {
-                    if (enableSystemPromptCache) {
-                        cachingSystemPromptForOpenRouter(request.body.messages, cacheTTL);
+                    if (cachingAtDepthForClaude !== -1) {
+                        cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepthForClaude, cacheTTLForClaude);
                     }
 
-                    if (cachingAtDepth !== -1) {
-                        cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth, cacheTTL);
+                    if (enableSystemPromptCacheForClaude) {
+                        cachingSystemPromptForOpenRouter(request.body.messages, cacheTTLForClaude);
                     }
                 }
 
                 if (isCacheableGemini && enableGeminiSystemPromptCache) {
                     cachingSystemPromptForOpenRouter(request.body.messages);
                 }
+
+                const cacheControlsAfter = countCacheControls(request.body.messages);
+                console.log('[OpenRouter Claude cache]', {
+                    model: request.body.model,
+                    isClaude,
+                    cacheTTL: cacheTTLForClaude,
+                    enableSystemPromptCache: enableSystemPromptCacheForClaude,
+                    cachingAtDepth: cachingAtDepthForClaude,
+                    cacheControlsBefore,
+                    cacheControlsAfter,
+                });
             }
 
             if (isGemini) {
