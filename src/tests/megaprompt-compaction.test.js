@@ -144,8 +144,26 @@ test('[megaprompt] sealed retains cache_control on the LAST content part after M
   assert.equal(lastText.cache_control.ttl, '5m');
 });
 
+// 8) MERGE should preserve existing cache_control-bearing text parts (important for OpenRouter path)
+test('[megaprompt][merge] preserves sealed cache_control metadata before provider conversion', () => {
+  const msgs = [U('1'), A('2'), U('3'), A('4'), U('5'), A('6')];
+  const compacted = applyMegapromptCompaction(msgs, 1, { enabled: true, turnMultiple: 4, minLiveTailTurns: 2, ttl: '5m' });
 
-// 8) OpenRouter path: after MERGE, anchors placed per spacing/depth; sealed may not be directly anchored
+  const names = { charName: '', userName: '', groupNames: [], startsWithGroupName: () => false };
+  const merged = postProcessPrompt(compacted, PROMPT_PROCESSING_TYPE.MERGE, names);
+
+  const sealedCarrier = merged.find((m) => m?._megapromptSealed);
+  assert.ok(sealedCarrier, 'expected merged prompt to retain _megapromptSealed marker');
+  assert.ok(Array.isArray(sealedCarrier.content), 'expected merged sealed content to remain an array');
+
+  const cachePart = sealedCarrier.content.find((c) => c?.cache_control);
+  assert.ok(cachePart, 'expected cache_control to survive MERGE');
+  assert.equal(cachePart.cache_control.type, 'ephemeral');
+  assert.equal(cachePart.cache_control.ttl, '5m');
+});
+
+
+// 9) OpenRouter path: after MERGE, anchors placed per spacing/depth; sealed may not be directly anchored
 test('[megaprompt][openrouter] places at least one anchor; sealed not required to be anchored', () => {
   const msgs = [U('1'), A('2'), U('3'), A('4'), U('5'), A('6')];
   const compacted = applyMegapromptCompaction(msgs, 1, { enabled: true, turnMultiple: 4, minLiveTailTurns: 2, ttl: '5m' });
@@ -168,7 +186,7 @@ test('[megaprompt][openrouter] places at least one anchor; sealed not required t
 });
 
 
-// 9) Tail absorbs leftover beyond multiple to avoid any middle gap
+// 10) Tail absorbs leftover beyond multiple to avoid any middle gap
 // UA: 8, depth=1 => baseTail=2, archival=6, lastMultiple=4, leftover=2 => effectiveTail=4 => [U5,A6,U7,A8]
 test('[megaprompt] tail absorbs leftover beyond multiple (no middle gap)', () => {
   const msgs8 = [U('1'), A('2'), U('3'), A('4'), U('5'), A('6'), U('7'), A('8')];

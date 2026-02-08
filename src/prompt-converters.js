@@ -951,6 +951,12 @@ export function mergeMessages(messages, names, { strict = false, placeholders = 
 
     /** @type {Map<string,object>} */
     const contentTokens = new Map();
+    const makeContentToken = (contentPart) => {
+        const token = crypto.randomBytes(32).toString('base64');
+        // Preserve metadata (e.g. cache_control on text blocks) across flatten/merge/rebuild.
+        contentTokens.set(token, structuredClone(contentPart));
+        return token;
+    };
 
     // Remove names from the messages
     messages.forEach((message) => {
@@ -961,13 +967,16 @@ export function mergeMessages(messages, names, { strict = false, placeholders = 
         if (Array.isArray(message.content)) {
             const text = message.content.map((content) => {
                 if (content.type === 'text') {
+                    // Preserve text parts that carry metadata (cache_control, citations, etc).
+                    const hasMetadata = Object.keys(content).some((key) => key !== 'type' && key !== 'text');
+                    if (hasMetadata) {
+                        return makeContentToken(content);
+                    }
                     return content.text;
                 }
                 // Could be extended with other non-text types
                 if (['image_url', 'video_url', 'audio_url'].includes(content.type)) {
-                    const token = crypto.randomBytes(32).toString('base64');
-                    contentTokens.set(token, content);
-                    return token;
+                    return makeContentToken(content);
                 }
                 return '';
             }).join('\n\n');
@@ -1040,7 +1049,7 @@ export function mergeMessages(messages, names, { strict = false, placeholders = 
 
                 splitContent.forEach((content) => {
                     if (contentTokens.has(content)) {
-                        mergedContent.push(contentTokens.get(content));
+                        mergedContent.push(structuredClone(contentTokens.get(content)));
                     } else {
                         if (mergedContent.length > 0 && mergedContent[mergedContent.length - 1].type === 'text') {
                             mergedContent[mergedContent.length - 1].text += `\n\n${content}`;
