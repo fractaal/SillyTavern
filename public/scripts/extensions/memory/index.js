@@ -1,4 +1,4 @@
-import { getStringHash, debounce, waitUntilCondition, extractAllWords, isTrueBoolean } from '../../utils.js';
+import { getStringHash, debounce, waitUntilCondition, extractAllWords, isTrueBoolean, stringToRange } from '../../utils.js';
 import { getContext, getApiUrl, extension_settings, doExtrasFetch, modules, renderExtensionTemplateAsync } from '../../extensions.js';
 import {
     activateSendButtons,
@@ -20,7 +20,7 @@ import {
 } from '../../../script.js';
 import { is_group_generating, selected_group } from '../../group-chats.js';
 import { loadMovingUIState, power_user } from '../../power-user.js';
-import { dragElement } from '../../RossAscends-mods.js';
+import { dragElement, getMessageTimeStamp } from '../../RossAscends-mods.js';
 import { getTextTokens, getTokenCountAsync, tokenizers } from '../../tokenizers.js';
 import { debounce_timeout } from '../../constants.js';
 import { SlashCommandParser } from '../../slash-commands/SlashCommandParser.js';
@@ -30,6 +30,7 @@ import { macros, MacroCategory } from '../../macros/macro-system.js';
 import { countWebLlmTokens, generateWebLlmChatPrompt, getWebLlmContextSize, isWebLlmSupported } from '../shared.js';
 import { commonEnumProviders } from '../../slash-commands/SlashCommandCommonEnumsProvider.js';
 import { removeReasoningFromString } from '../../reasoning.js';
+import { callGenericPopup, POPUP_TYPE } from '../../popup.js';
 import { MacrosParser } from '/scripts/macros.js';
 export { MODULE_NAME };
 
@@ -104,6 +105,18 @@ const prompt_builders = {
 
 const defaultPrompt = 'Ignore previous instructions. Summarize the most important facts and events in the story so far. If a summary already exists in your memory, use that as a base and expand with new facts. Limit the summary to {{words}} words or less. Your response should include nothing but the summary.';
 const defaultTemplate = '[Summary: {{summary}}]';
+const defaultCompactPrompt = `<OOC: Summarize this story from the onset ALL THE WAY to where we are now.
+
+We want to compact context as the story has gotten fairly long already.
+
+FOCUS ON Keeping and focusing on important story beats and happenings.
+
+You may drop FEEDBACKS/GUIDES/OOCs -- these will be reintroduced anyway.
+
+Do not sacrifice nuance for brevity!
+
+Structure it almost like a "previously on" like in serialized TV shows./>`;
+const defaultCompactName = 'Previously On';
 
 const defaultSettings = {
     memoryFrozen: false,
@@ -500,22 +513,13 @@ async function forceSummarizeChat(quiet) {
 }
 
 /**
- * Callback for the summarize command.
- * @param {object} args Command arguments
+ * Summarize text using a specific source and prompt.
  * @param {string} text Text to summarize
+ * @param {string} source Summarization source
+ * @param {string} prompt Summarization prompt
+ * @returns {Promise<string>} Summarized text
  */
-async function summarizeCallback(args, text) {
-    text = text.trim();
-
-    // Summarize the current chat if no text provided
-    if (!text) {
-        const quiet = isTrueBoolean(args.quiet);
-        return await forceSummarizeChat(quiet);
-    }
-
-    const source = args.source || extension_settings.memory.source;
-    const prompt = substituteParamsExtended((args.prompt || extension_settings.memory.prompt), { words: extension_settings.memory.promptWords });
-
+async function summarizeTextWithSource(text, source, prompt) {
     try {
         switch (source) {
             case summary_sources.extras:
@@ -536,6 +540,214 @@ async function summarizeCallback(args, text) {
         console.log(error);
         return '';
     }
+}
+
+/**
+ * Builds a stable hash for a chat range to guard against concurrent edits.
+ * @param {ChatMessage[]} chat Chat messages
+ * @param {{start: number, end: number}} range Message range
+ * @returns {number} Hash of the message range
+ */
+function getCompactionRangeHash(chat, range) {
+    const items = [];
+
+    for (let index = range.start; index <= range.end; index++) {
+        const message = chat[index];
+        items.push([
+            String(index),
+            String(message?.name ?? ''),
+            String(message?.mes ?? ''),
+            message?.is_user ? '1' : '0',
+            message?.is_system ? '1' : '0',
+            String(message?.extra?.type ?? ''),
+        ].join('|'));
+    }
+
+    return getStringHash(items.join('\n'));
+}
+
+/**
+ * Creates a transcript from a message range for compaction summarization.
+ * @param {ChatMessage[]} chat Chat messages
+ * @param {{start: number, end: number}} range Message range
+ * @returns {string} Transcript text
+ */
+function getCompactionTranscript(chat, range) {
+    const transcript = [];
+
+    for (let index = range.start; index <= range.end; index++) {
+        const message = chat[index];
+
+        if (!message) {
+            continue;
+        }
+
+        const content = String(message.mes ?? '').trim();
+
+        if (!content.length) {
+            continue;
+        }
+
+        const fallbackName = message.is_user ? 'User' : 'Assistant';
+        const speaker = String(message.name ?? fallbackName).trim() || fallbackName;
+        transcript.push(`${speaker}:\n${content}`);
+    }
+
+    return transcript.join('\n\n');
+}
+
+/**
+ * Create a chat message object for a compacted summary.
+ * @param {string} summary Summary text
+ * @param {string} name Display name for the summary message
+ * @param {{start: number, end: number}} range Original compacted range
+ * @param {string} source Summarization source
+ * @returns {ChatMessage} Chat message
+ */
+function createCompactionMessage(summary, name, range, source) {
+    return {
+        name: name,
+        is_user: false,
+        is_system: false,
+        send_date: getMessageTimeStamp(),
+        mes: summary,
+        extra: {
+            api: 'compact',
+            model: source,
+            compact: {
+                start: range.start,
+                end: range.end,
+                created: Date.now(),
+            },
+        },
+    };
+}
+
+/**
+ * Callback for the compact command.
+ * @param {object} args Command arguments
+ * @param {string} value Message index or range to compact
+ * @returns {Promise<string>} Summary text
+ */
+async function compactCallback(args, value) {
+    const context = getContext();
+
+    if (!Array.isArray(context.chat) || context.chat.length === 0) {
+        toastr.warning('No chat messages to compact');
+        return '';
+    }
+
+    const rangeInput = String(value ?? '').trim();
+
+    if (!rangeInput.length) {
+        toastr.warning('Must provide a message index or range to compact.');
+        return '';
+    }
+
+    const range = stringToRange(rangeInput, 0, context.chat.length - 1);
+
+    if (!range) {
+        toastr.warning('Must provide a valid 0-based message index or range within chat bounds.');
+        return '';
+    }
+
+    const source = args.source || summary_sources.main;
+    const allowedSources = Object.values(summary_sources);
+
+    if (!allowedSources.includes(source)) {
+        toastr.warning(`Invalid source. Allowed: ${allowedSources.join(', ')}`);
+        return '';
+    }
+
+    if (source === summary_sources.extras) {
+        toastr.warning('source=extras may ignore custom prompts. For predictable compaction, source=main is recommended.', 'Compact');
+    }
+
+    const rangeCount = (range.end - range.start) + 1;
+    const force = isTrueBoolean(args.force);
+    const dry = isTrueBoolean(args.dry);
+    const name = String(args.name ?? defaultCompactName).trim() || defaultCompactName;
+    const promptTemplate = String(args.prompt ?? '').trim() || defaultCompactPrompt;
+    const prompt = substituteParamsExtended(promptTemplate, { words: extension_settings.memory.promptWords });
+    const transcript = getCompactionTranscript(context.chat, range);
+
+    if (!transcript.length) {
+        toastr.warning('No message text found in the selected range.');
+        return '';
+    }
+
+    if (!dry && !force) {
+        const confirmation = `Compact messages ${range.start}-${range.end} (${rangeCount} message${rangeCount !== 1 ? 's' : ''}) into one summary message?\nThis rewrites chat history and cannot be undone from the UI.`;
+        const confirmed = await callGenericPopup(confirmation, POPUP_TYPE.CONFIRM, '', { okButton: 'Compact', cancelButton: 'Cancel' });
+
+        if (!confirmed) {
+            return '';
+        }
+    }
+
+    const originalLength = context.chat.length;
+    const rangeHash = getCompactionRangeHash(context.chat, range);
+    const toast = toastr.info('Compacting chat range...', 'Please wait', { timeOut: 0, extendedTimeOut: 0 });
+    let summary = '';
+
+    try {
+        inApiCall = true;
+        summary = await summarizeTextWithSource(transcript, source, prompt);
+    } finally {
+        inApiCall = false;
+        toastr.clear(toast);
+    }
+
+    summary = String(summary ?? '').trim();
+
+    if (!summary.length) {
+        toastr.warning('Failed to summarize the selected range.');
+        return '';
+    }
+
+    if (dry) {
+        toastr.success(`Dry run complete for messages ${range.start}-${range.end}.`);
+        return summary;
+    }
+
+    if (isContextChanged(context)) {
+        toastr.warning('Chat changed while compacting. Please try again.');
+        return '';
+    }
+
+    const latestContext = getContext();
+
+    if (latestContext.chat.length !== originalLength || getCompactionRangeHash(latestContext.chat, range) !== rangeHash) {
+        toastr.warning('Chat content changed while compacting. Please try again.');
+        return '';
+    }
+
+    const compactedMessage = createCompactionMessage(summary, name, range, source);
+    latestContext.chat.splice(range.start, rangeCount, compactedMessage);
+    await latestContext.saveChat();
+    await latestContext.reloadCurrentChat();
+
+    toastr.success(`Compacted messages ${range.start}-${range.end} into one summary message.`);
+    return summary;
+}
+
+/**
+ * Callback for the summarize command.
+ * @param {object} args Command arguments
+ * @param {string} text Text to summarize
+ */
+async function summarizeCallback(args, text) {
+    text = text.trim();
+
+    // Summarize the current chat if no text provided
+    if (!text) {
+        const quiet = isTrueBoolean(args.quiet);
+        return await forceSummarizeChat(quiet);
+    }
+
+    const source = args.source || extension_settings.memory.source;
+    const prompt = substituteParamsExtended((args.prompt || extension_settings.memory.prompt), { words: extension_settings.memory.promptWords });
+    return await summarizeTextWithSource(text, source, prompt);
 }
 
 async function summarizeChat(context) {
@@ -1106,6 +1318,49 @@ jQuery(async function () {
             new SlashCommandArgument('text to summarize', [ARGUMENT_TYPE.STRING], false, false, ''),
         ],
         helpString: 'Summarizes the given text. If no text is provided, the current chat will be summarized. Can specify the source and the prompt to use.',
+        returns: ARGUMENT_TYPE.STRING,
+    }));
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'compact',
+        callback: compactCallback,
+        namedArgumentList: [
+            new SlashCommandNamedArgument('source', 'API to use for summarization', [ARGUMENT_TYPE.STRING], false, false, summary_sources.main, Object.values(summary_sources)),
+            SlashCommandNamedArgument.fromProps({
+                name: 'prompt',
+                description: 'prompt to use for compaction summarization',
+                typeList: [ARGUMENT_TYPE.STRING],
+                defaultValue: '',
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'name',
+                description: 'display name for the compacted summary message',
+                typeList: [ARGUMENT_TYPE.STRING],
+                defaultValue: defaultCompactName,
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'force',
+                description: 'skip confirmation prompt',
+                typeList: [ARGUMENT_TYPE.BOOLEAN],
+                defaultValue: 'false',
+                enumList: commonEnumProviders.boolean('trueFalse')(),
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'dry',
+                description: 'generate summary without rewriting chat history',
+                typeList: [ARGUMENT_TYPE.BOOLEAN],
+                defaultValue: 'false',
+                enumList: commonEnumProviders.boolean('trueFalse')(),
+            }),
+        ],
+        unnamedArgumentList: [
+            SlashCommandArgument.fromProps({
+                description: 'message index (starts with 0) or range',
+                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE],
+                isRequired: true,
+                enumProvider: commonEnumProviders.messages(),
+            }),
+        ],
+        helpString: 'Compacts a message index/range into one summary message and rewrites chat history (e.g., /compact 0-99). Defaults to source=main.',
         returns: ARGUMENT_TYPE.STRING,
     }));
 
