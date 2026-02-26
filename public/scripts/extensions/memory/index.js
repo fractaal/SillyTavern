@@ -117,6 +117,12 @@ Do not sacrifice nuance for brevity!
 
 Structure it almost like a "previously on" like in serialized TV shows./>`;
 const defaultCompactName = 'Previously On';
+const defaultCompactBoundaryNotice = 'This marks the end of the transcript to be summarized/compacted.';
+const defaultCompactPostamble = `Given all this, please provide the compacted continuity summary now.
+
+Return only the summary text.
+Do not add roleplay continuation, hooks, or invitations (for example: "Ready to kick back off wherever we left off!").
+Do not address the user or assistant directly.`;
 
 const defaultSettings = {
     memoryFrozen: false,
@@ -669,7 +675,10 @@ async function compactCallback(args, value) {
     const name = String(args.name ?? defaultCompactName).trim() || defaultCompactName;
     const promptTemplate = String(args.prompt ?? '').trim() || defaultCompactPrompt;
     const prompt = substituteParamsExtended(promptTemplate, { words: extension_settings.memory.promptWords });
+    const postambleTemplate = String(args.postamble ?? '').trim() || defaultCompactPostamble;
+    const postamble = substituteParamsExtended(postambleTemplate, { words: extension_settings.memory.promptWords });
     const transcript = getCompactionTranscript(context.chat, range);
+    const summarizeInput = `${transcript}\n\n[End of transcript]\n${defaultCompactBoundaryNotice}\n\n[Original task reminder]\n${prompt}\n\n[Final instruction]\n${postamble}`;
 
     if (!transcript.length) {
         toastr.warning('No message text found in the selected range.');
@@ -692,7 +701,7 @@ async function compactCallback(args, value) {
 
     try {
         inApiCall = true;
-        summary = await summarizeTextWithSource(transcript, source, prompt);
+        summary = await summarizeTextWithSource(summarizeInput, source, prompt);
     } finally {
         inApiCall = false;
         toastr.clear(toast);
@@ -1336,6 +1345,12 @@ jQuery(async function () {
                 description: 'display name for the compacted summary message',
                 typeList: [ARGUMENT_TYPE.STRING],
                 defaultValue: defaultCompactName,
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'postamble',
+                description: 'extra final instruction appended after the transcript before summarization',
+                typeList: [ARGUMENT_TYPE.STRING],
+                defaultValue: '',
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'force',
