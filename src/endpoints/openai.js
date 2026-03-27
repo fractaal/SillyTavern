@@ -8,7 +8,7 @@ import express from 'express';
 import { getConfigValue, mergeObjectWithYaml, excludeKeysByYaml, trimV1, delay } from '../util.js';
 import { setAdditionalHeaders } from '../additional-headers.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
-import { AIMLAPI_HEADERS, OPENROUTER_HEADERS, ZAI_ENDPOINT } from '../constants.js';
+import { AIMLAPI_HEADERS, OPENROUTER_HEADERS, SILICONFLOW_ENDPOINT, ZAI_ENDPOINT } from '../constants.js';
 
 export const router = express.Router();
 
@@ -262,8 +262,7 @@ router.post('/caption-image', async (request, response) => {
         }
 
         return response.json({ caption });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         response.status(500).send('Internal server error');
     }
@@ -489,6 +488,84 @@ router.post('/chutes/models/embedding', async (request, response) => {
         return response.json(data.items);
     } catch (error) {
         console.error('Chutes embedding models fetch failed', error);
+        response.sendStatus(500);
+    }
+});
+
+router.post('/nanogpt/models/embedding', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
+
+        if (!key) {
+            console.warn('No NanoGPT key found');
+            return response.sendStatus(400);
+        }
+
+        const result = await fetch('https://nano-gpt.com/api/v1/embedding-models', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${key}`,
+                'Accept-Encoding': 'identity',
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('NanoGPT embedding models request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        /** @type {any} */
+        const data = await result.json();
+
+        if (!Array.isArray(data?.data)) {
+            console.warn('NanoGPT embedding models response invalid', data);
+            return response.sendStatus(500);
+        }
+        return response.json(data.data);
+    } catch (error) {
+        console.error('NanoGPT embedding models fetch failed', error);
+        response.sendStatus(500);
+    }
+});
+
+router.post('/siliconflow/models/embedding', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.SILICONFLOW);
+
+        if (!key) {
+            console.warn('No SiliconFlow key found');
+            return response.sendStatus(400);
+        }
+
+        const apiUrl = request.body.siliconflow_endpoint === SILICONFLOW_ENDPOINT.CN
+            ? 'https://api.siliconflow.cn/v1/models?type=text&sub_type=embedding'
+            : 'https://api.siliconflow.com/v1/models?type=text&sub_type=embedding';
+
+        const result = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${key}`,
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('SiliconFlow embedding models request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        /** @type {any} */
+        const data = await result.json();
+
+        if (!Array.isArray(data?.data)) {
+            console.warn('SiliconFlow embedding models response invalid', data);
+            return response.sendStatus(500);
+        }
+
+        return response.json(data.data);
+    } catch (error) {
+        console.error('SiliconFlow embedding models fetch failed', error);
         response.sendStatus(500);
     }
 });

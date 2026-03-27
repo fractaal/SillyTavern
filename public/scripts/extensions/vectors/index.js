@@ -71,6 +71,8 @@ const settings = {
     webllm_model: '',
     google_model: 'text-embedding-005',
     chutes_model: 'chutes-qwen-qwen3-embedding-8b',
+    nanogpt_model: 'text-embedding-3-small',
+    siliconflow_model: 'Qwen/Qwen3-Embedding-0.6B',
     summarize: false,
     summarize_sent: false,
     summary_source: 'main',
@@ -250,8 +252,7 @@ async function summarizeExtra(element) {
             const data = await apiResult.json();
             element.text = data.summary;
         }
-    }
-    catch (error) {
+    } catch (error) {
         console.log(error);
         return false;
     }
@@ -834,6 +835,13 @@ function getVectorsRequestBody(args = {}) {
         case 'chutes':
             body.model = extension_settings.vectors.chutes_model;
             break;
+        case 'nanogpt':
+            body.model = extension_settings.vectors.nanogpt_model;
+            break;
+        case 'siliconflow':
+            body.model = extension_settings.vectors.siliconflow_model;
+            body.siliconflow_endpoint = oai_settings.siliconflow_endpoint;
+            break;
         default:
             break;
     }
@@ -919,13 +927,15 @@ function throwIfSourceInvalid() {
     if (settings.source === 'openai' && !secret_state[SECRET_KEYS.OPENAI] ||
         settings.source === 'electronhub' && !secret_state[SECRET_KEYS.ELECTRONHUB] ||
         settings.source === 'chutes' && !secret_state[SECRET_KEYS.CHUTES] ||
+        settings.source === 'nanogpt' && !secret_state[SECRET_KEYS.NANOGPT] ||
         settings.source === 'openrouter' && !secret_state[SECRET_KEYS.OPENROUTER] ||
         settings.source === 'palm' && !secret_state[SECRET_KEYS.MAKERSUITE] ||
         settings.source === 'vertexai' && !secret_state[SECRET_KEYS.VERTEXAI] && !secret_state[SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT] ||
         settings.source === 'mistral' && !secret_state[SECRET_KEYS.MISTRALAI] ||
         settings.source === 'togetherai' && !secret_state[SECRET_KEYS.TOGETHERAI] ||
         settings.source === 'nomicai' && !secret_state[SECRET_KEYS.NOMICAI] ||
-        settings.source === 'cohere' && !secret_state[SECRET_KEYS.COHERE]) {
+        settings.source === 'cohere' && !secret_state[SECRET_KEYS.COHERE] ||
+        settings.source === 'siliconflow' && !secret_state[SECRET_KEYS.SILICONFLOW]) {
         throw new Error('Vectors: API key missing', { cause: 'api_key_missing' });
     }
 
@@ -933,8 +943,7 @@ function throwIfSourceInvalid() {
         if (!settings.alt_endpoint_url) {
             throw new Error('Vectors: API URL missing', { cause: 'api_url_missing' });
         }
-    }
-    else {
+    } else {
         if (settings.source === 'ollama' && !textgenerationwebui_settings.server_urls[textgen_types.OLLAMA] ||
             settings.source === 'vllm' && !textgenerationwebui_settings.server_urls[textgen_types.VLLM] ||
             settings.source === 'koboldcpp' && !textgenerationwebui_settings.server_urls[textgen_types.KOBOLDCPP] ||
@@ -1134,6 +1143,7 @@ function toggleSettings() {
     $('#openai_vectorsModel').toggle(settings.source === 'openai');
     $('#electronhub_vectorsModel').toggle(settings.source === 'electronhub');
     $('#chutes_vectorsModel').toggle(settings.source === 'chutes');
+    $('#nanogpt_vectorsModel').toggle(settings.source === 'nanogpt');
     $('#openrouter_vectorsModel').toggle(settings.source === 'openrouter');
     $('#cohere_vectorsModel').toggle(settings.source === 'cohere');
     $('#ollama_vectorsModel').toggle(settings.source === 'ollama');
@@ -1143,6 +1153,7 @@ function toggleSettings() {
     $('#webllm_vectorsModel').toggle(settings.source === 'webllm');
     $('#koboldcpp_vectorsModel').toggle(settings.source === 'koboldcpp');
     $('#google_vectorsModel').toggle(settings.source === 'palm' || settings.source === 'vertexai');
+    $('#siliconflow_vectorsModel').toggle(settings.source === 'siliconflow');
     $('#vector_altEndpointUrl').toggle(vectorApiRequiresUrl.includes(settings.source));
     switch (settings.source) {
         case 'webllm':
@@ -1156,6 +1167,12 @@ function toggleSettings() {
             break;
         case 'chutes':
             loadChutesModels();
+            break;
+        case 'nanogpt':
+            loadNanoGPTModels();
+            break;
+        case 'siliconflow':
+            loadSiliconFlowModels();
             break;
     }
 }
@@ -1192,6 +1209,40 @@ function populateChutesModelSelect(models) {
         settings.chutes_model = models[0].slug;
     }
     $('#vectors_chutes_model').val(settings.chutes_model);
+}
+
+async function loadNanoGPTModels() {
+    try {
+        const response = await fetch('/api/openai/nanogpt/models/embedding', {
+            method: 'POST',
+            headers: getRequestHeaders({ omitContentType: true }),
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        /** @type {Array<any>} */
+        const data = await response.json();
+        const models = Array.isArray(data) ? data : [];
+        populateNanoGPTModelSelect(models);
+    } catch (err) {
+        console.warn('NanoGPT models fetch failed', err);
+        populateNanoGPTModelSelect([]);
+    }
+}
+
+function populateNanoGPTModelSelect(models) {
+    const select = $('#vectors_nanogpt_model');
+    select.empty();
+    for (const m of models) {
+        const option = document.createElement('option');
+        option.value = m.id;
+        option.text = m.name || m.id;
+        select.append(option);
+    }
+    if (!settings.nanogpt_model && models.length) {
+        settings.nanogpt_model = models[0].id;
+    }
+    $('#vectors_nanogpt_model').val(settings.nanogpt_model);
 }
 
 async function loadElectronHubModels() {
@@ -1269,6 +1320,45 @@ function populateOpenRouterModelSelect(models) {
         settings.openrouter_model = models[0].id;
     }
     $('#vectors_openrouter_model').val(settings.openrouter_model);
+}
+
+async function loadSiliconFlowModels() {
+    try {
+        const response = await fetch('/api/openai/siliconflow/models/embedding', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                siliconflow_endpoint: oai_settings.siliconflow_endpoint,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        /** @type {Array<any>} */
+        const data = await response.json();
+        const models = Array.isArray(data) ? data : [];
+        populateSiliconFlowModelSelect(models);
+    } catch (err) {
+        console.warn('SiliconFlow models fetch failed', err);
+        populateSiliconFlowModelSelect([]);
+    }
+}
+
+function populateSiliconFlowModelSelect(models) {
+    const select = $('#vectors_siliconflow_model');
+    select.empty();
+    for (const m of models) {
+        const option = document.createElement('option');
+        option.value = m.id;
+        option.text = m.id;
+        select.append(option);
+    }
+    if (!settings.siliconflow_model && models.length) {
+        settings.siliconflow_model = models[0].id;
+    }
+    $('#vectors_siliconflow_model').val(settings.siliconflow_model);
 }
 
 /**
@@ -1413,7 +1503,6 @@ async function onViewStatsClick() {
             messageElement.addClass('vectorized');
         }
     }
-
 }
 
 async function onVectorizeAllFilesClick() {
@@ -1676,6 +1765,16 @@ jQuery(async () => {
     });
     $('#vectors_chutes_model').val(settings.chutes_model).on('change', () => {
         settings.chutes_model = String($('#vectors_chutes_model').val());
+        Object.assign(extension_settings.vectors, settings);
+        saveSettingsDebounced();
+    });
+    $('#vectors_nanogpt_model').val(settings.nanogpt_model).on('change', () => {
+        settings.nanogpt_model = String($('#vectors_nanogpt_model').val());
+        Object.assign(extension_settings.vectors, settings);
+        saveSettingsDebounced();
+    });
+    $('#vectors_siliconflow_model').val(settings.siliconflow_model).on('change', () => {
+        settings.siliconflow_model = String($('#vectors_siliconflow_model').val());
         Object.assign(extension_settings.vectors, settings);
         saveSettingsDebounced();
     });

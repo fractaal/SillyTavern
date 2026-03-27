@@ -20,10 +20,12 @@
                     <option value="llamacpp">llama.cpp</option>
                     <option value="transformers" data-i18n="Local (Transformers)">Local (Transformers)</option>
                     <option value="mistral">MistralAI</option>
+                    <option value="nanogpt">NanoGPT</option>
                     <option value="nomicai">NomicAI</option>
                     <option value="ollama">Ollama</option>
                     <option value="openai">OpenAI</option>
                     <option value="openrouter">OpenRouter</option>
+                    <option value="siliconflow">SiliconFlow</option>
                     <option value="togetherai">TogetherAI</option>
                     <option value="vllm">vLLM</option>
                     <option value="webllm" data-i18n="WebLLM Extension">WebLLM Extension</option>
@@ -36,6 +38,15 @@
                 <select id="vectors_chutes_model" class="text_pole"></select>
                 <i data-i18n="Hint: Set your Chutes API key in API Connections.">
                     Hint: Set your Chutes API key in API Connections.
+                </i>
+            </div>
+            <div class="flex-container flexFlowColumn" id="nanogpt_vectorsModel">
+                <label for="vectors_nanogpt_model" data-i18n="Vectorization Model">
+                    Vectorization Model
+                </label>
+                <select id="vectors_nanogpt_model" class="text_pole"></select>
+                <i data-i18n="Hint: Set your NanoGPT API key in API Connections.">
+                    Hint: Set your NanoGPT API key in API Connections.
                 </i>
             </div>
             <div class="flex-container flexFlowColumn" id="electronhub_vectorsModel">
@@ -159,6 +170,7 @@
                 </label>
                 <select id="vectors_google_model" class="text_pole">
                     <option value="gemini-embedding-001">gemini-embedding-001</option>
+                    <option value="gemini-embedding-2-preview">gemini-embedding-2-preview</option>
                     <option value="gemini-embedding-exp-03-07">gemini-embedding-exp-03-07</option>
                     <option value="text-embedding-004">text-embedding-004</option>
                     <option value="text-embedding-005">text-embedding-005</option>
@@ -181,6 +193,15 @@
                 <select id="vectors_openrouter_model" class="text_pole"></select>
                 <i data-i18n="Hint: Set your OpenRouter API key in API Connections.">
                     Hint: Set your OpenRouter API key in API Connections.
+                </i>
+            </div>
+            <div class="flex-container flexFlowColumn" id="siliconflow_vectorsModel">
+                <label for="vectors_siliconflow_model" data-i18n="Vectorization Model">
+                    Vectorization Model
+                </label>
+                <select id="vectors_siliconflow_model" class="text_pole"></select>
+                <i data-i18n="Hint: Set your SiliconFlow API key in API Connections.">
+                    Hint: Set your SiliconFlow API key in API Connections.
                 </i>
             </div>
 

@@ -12,6 +12,7 @@ import mime from 'mime-types';
 
 import { delay, getBasicAuthHeader, isValidUrl, tryParse } from '../util.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
+import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { AIMLAPI_HEADERS } from '../constants.js';
 
 /**
@@ -157,7 +158,6 @@ router.post('/samplers', async (request, response) => {
         const data = await result.json();
         const names = data.map(x => x.name);
         return response.send(names);
-
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -532,6 +532,34 @@ comfy.post('/delete-workflow', async (request, response) => {
     }
 });
 
+comfy.post('/rename-workflow', getFileNameValidationFunction('old_name'), getFileNameValidationFunction('new_name'), async (request, response) => {
+    try {
+        const oldName = sanitize(String(request.body.old_name));
+        const newName = sanitize(String(request.body.new_name));
+
+        if (path.extname(oldName).toLowerCase() !== '.json' || path.extname(newName).toLowerCase() !== '.json') {
+            return response.status(400).send('Only JSON workflow files are allowed');
+        }
+
+        const oldPath = path.join(request.user.directories.comfyWorkflows, oldName);
+        const newPath = path.join(request.user.directories.comfyWorkflows, newName);
+
+        if (!fs.existsSync(oldPath)) {
+            return response.status(404).send('Workflow not found');
+        }
+
+        if (fs.existsSync(newPath)) {
+            return response.status(409).send('A workflow with that name already exists');
+        }
+
+        fs.renameSync(oldPath, newPath);
+        return response.sendStatus(204);
+    } catch (error) {
+        console.error('ComfyUI workflow rename failed', error);
+        return response.sendStatus(500);
+    }
+});
+
 comfy.post('/generate', async (request, response) => {
     try {
         let item;
@@ -795,6 +823,73 @@ together.post('/generate', async (request, response) => {
         }
 
         return response.send({ format: 'jpg', data: b64_json });
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+const sdcpp = express.Router();
+
+sdcpp.post('/ping', async (request, response) => {
+    try {
+        const url = new URL(request.body.url);
+        url.pathname = '/v1/images/generations';
+
+        const result = await fetch(url, { method: 'OPTIONS' });
+        if (!result.ok) {
+            throw new Error('stable-diffusion.cpp server returned an error.');
+        }
+
+        return response.sendStatus(200);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+sdcpp.post('/generate', async (request, response) => {
+    try {
+        const url = new URL(request.body.url);
+        url.pathname = '/sdapi/v1/txt2img';
+
+        const payload = {
+            prompt: request.body.prompt,
+            negative_prompt: request.body.negative_prompt,
+            width: request.body.width,
+            height: request.body.height,
+            steps: request.body.steps,
+            cfg_scale: request.body.cfg_scale,
+            seed: request.body.seed,
+            batch_size: request.body.batch_size,
+            sampler_name: request.body.sampler_name,
+            scheduler: request.body.scheduler,
+            clip_skip: request.body.clip_skip,
+        };
+
+        for (const [key, value] of Object.entries(payload)) {
+            if (value === undefined || value === null || value === '') {
+                delete payload[key];
+            }
+        }
+
+        console.debug('stable-diffusion.cpp request:', payload);
+
+        const result = await fetch(url, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            throw new Error('stable-diffusion.cpp server returned an error.', { cause: text });
+        }
+
+        const data = await result.json();
+        return response.send(data);
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -1221,8 +1316,7 @@ chutes.post('/models', async (request, response) => {
         const chutesData = /** @type {{items: Array<{name: string}>}} */ (data);
         const models = chutesData.items.map(x => ({ value: x.name, text: x.name })).sort((a, b) => a?.text?.localeCompare(b?.text));
         return response.send(models);
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1268,8 +1362,7 @@ chutes.post('/generate', async (request, response) => {
         const base64 = Buffer.from(buffer).toString('base64');
 
         return response.send({ image: base64 });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1310,8 +1403,7 @@ nanogpt.post('/models', async (request, response) => {
 
         const models = Object.values(imageModels).map(x => ({ value: x.model, text: x.name }));
         return response.send(models);
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1352,8 +1444,7 @@ nanogpt.post('/generate', async (request, response) => {
         }
 
         return response.send({ image });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1632,6 +1723,8 @@ xai.post('/generate', async (request, response) => {
         const requestBody = {
             prompt: request.body.prompt,
             model: request.body.model,
+            aspect_ratio: request.body.aspect_ratio,
+            resolution: request.body.resolution,
             response_format: 'b64_json',
         };
 
@@ -1655,13 +1748,19 @@ xai.post('/generate', async (request, response) => {
         /** @type {any} */
         const data = await result.json();
 
-        const image = data?.data?.[0]?.b64_json;
-        if (!image) {
+        // Can either be a base64 buffer (always JPEG) or a data URL (with MIME type)
+        const encodedImage = String(data?.data?.[0]?.b64_json || '');
+        if (!encodedImage) {
             console.warn('xAI returned invalid data.');
             return response.sendStatus(500);
         }
 
-        return response.send({ image });
+        const dataUrlMatch = encodedImage.match(/^data:(.+);base64,(.+)$/);
+        const mimeType = dataUrlMatch?.[1] || 'image/jpeg';
+        const format = mime.extension(mimeType) || 'jpg';
+        const image = dataUrlMatch?.[2] || encodedImage;
+
+        return response.send({ image, format });
     } catch (error) {
         console.error('Error communicating with xAI', error);
         return response.sendStatus(500);
@@ -1917,6 +2016,7 @@ zai.post('/generate-video', async (request, response) => {
 router.use('/comfy', comfy);
 router.use('/comfyrunpod', comfyRunPod);
 router.use('/together', together);
+router.use('/sdcpp', sdcpp);
 router.use('/drawthings', drawthings);
 router.use('/pollinations', pollinations);
 router.use('/stability', stability);
