@@ -10620,10 +10620,14 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
  * @param {string} param.newFileName Destination chat name (no JSONL extension)
  * @param {boolean} [param.loader=true] Whether to show loader during the operation
  */
-export async function cloneGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName, loader = true }) {
-    try {
-        loader && showLoader();
+export async function cloneGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName, loader: showLoader }) {
+    const loaderHandle = showLoader ? loader.show({
+        title: t`Clone Chat`,
+        message: t`Cloning chat…`,
+        toastMode: loader.ToastMode.STATIC,
+    }) : null;
 
+    try {
         const body = {
             is_group: !!groupId,
             avatar_url: characters[characterId]?.avatar,
@@ -10673,11 +10677,10 @@ export async function cloneGroupOrCharacterChat({ characterId, groupId, oldFileN
         }
     } catch (err) {
         console.error('Clone chat error:', err);
-        loader && hideLoader();
         await delay(500);
         await callGenericPopup(t`An error has occurred. Chat was not cloned.`, POPUP_TYPE.TEXT);
     } finally {
-        loader && hideLoader();
+        await loaderHandle?.hide();
     }
 }
 
