@@ -1412,14 +1412,12 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
         }
     }
 
+    // Disabled diagnostic kept here intentionally: warn when total blocks exceed
+    // the available anchor spacing budget.
     /*
-
-
     if (overbudget) {
-
- d${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
+        console.warn(color.yellow(`[Claude caching][OpenRouter] Total blocks exceed ${MAX_ANCHORS}x${ANCHOR_SPACING_BLOCKS} coverage; parts of the prompt may be uncached.`));
     }
-
     */
 
     return;
