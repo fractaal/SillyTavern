@@ -71,12 +71,15 @@ import {
 } from '../script.js';
 import {
     extension_settings,
+    getExtensionManifest,
     ModuleWorkerWrapper,
     openThirdPartyExtensionMenu,
     renderExtensionTemplate,
     renderExtensionTemplateAsync,
     saveMetadataDebounced,
+    UNSET_VALUE,
     writeExtensionField,
+    writeExtensionFieldBulk,
 } from './extensions.js';
 import { groups, openGroupChat, selected_group, unshallowGroupMembers } from './group-chats.js';
 import { addLocaleData, getCurrentLocale, t, translate } from './i18n.js';
@@ -201,6 +204,7 @@ export function getContext() {
         generateRaw,
         generateRawData,
         writeExtensionField,
+        writeExtensionFieldBulk,
         getThumbnailUrl,
         selectCharacterById,
         messageFormatting,
@@ -290,9 +294,13 @@ export function getContext() {
         getReasoningTemplateByName,
         unshallowCharacter,
         unshallowGroupMembers,
+        getExtensionManifest,
         openThirdPartyExtensionMenu,
         symbols: {
             ignore: IGNORE_SYMBOL,
+        },
+        constants: {
+            unset: UNSET_VALUE,
         },
     };
 }
