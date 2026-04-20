@@ -76,6 +76,7 @@ import { renderTemplateAsync } from './templates.js';
 import { SlashCommandEnumValue } from './slash-commands/SlashCommandEnumValue.js';
 import { callGenericPopup, Popup, POPUP_RESULT, POPUP_TYPE } from './popup.js';
 import { t } from './i18n.js';
+import { reasoning_effort_types, resolveReasoningEffort } from './reasoning-effort.js';
 import { ToolManager } from './tool-calling.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { COMETAPI_IGNORE_PATTERNS, IGNORE_SYMBOL, MEDIA_DISPLAY, MEDIA_TYPE } from './constants.js';
@@ -230,15 +231,6 @@ const openrouter_middleout_types = {
     AUTO: 'auto',
     ON: 'on',
     OFF: 'off',
-};
-
-export const reasoning_effort_types = {
-    auto: 'auto',
-    low: 'low',
-    medium: 'medium',
-    high: 'high',
-    min: 'min',
-    max: 'max',
 };
 
 export const verbosity_levels = {
@@ -2553,26 +2545,12 @@ function getReasoningEffort(settings = null, model = null) {
         return settings.reasoning_effort;
     }
 
-    function resolveReasoningEffort() {
-        switch (settings.reasoning_effort) {
-            case reasoning_effort_types.auto:
-                return undefined;
-            case reasoning_effort_types.min:
-                if (chat_completion_sources.OPENROUTER === settings.chat_completion_source && !settings.show_thoughts) {
-                    return 'none';
-                }
-
-                return [chat_completion_sources.OPENAI, chat_completion_sources.AZURE_OPENAI].includes(settings.chat_completion_source) && /^gpt-5/.test(model)
-                    ? reasoning_effort_types.min
-                    : reasoning_effort_types.low;
-            case reasoning_effort_types.max:
-                return reasoning_effort_types.high;
-            default:
-                return settings.reasoning_effort;
-        }
-    }
-
-    const reasoningEffort = resolveReasoningEffort();
+    const reasoningEffort = resolveReasoningEffort({
+        chatCompletionSource: settings.chat_completion_source,
+        model,
+        selectedEffort: settings.reasoning_effort,
+        showThoughts: settings.show_thoughts,
+    });
 
     // Check if the resolved effort supported by the model
     if (settings.chat_completion_source === chat_completion_sources.ELECTRONHUB) {
