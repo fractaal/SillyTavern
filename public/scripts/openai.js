@@ -76,7 +76,7 @@ import { renderTemplateAsync } from './templates.js';
 import { SlashCommandEnumValue } from './slash-commands/SlashCommandEnumValue.js';
 import { callGenericPopup, Popup, POPUP_RESULT, POPUP_TYPE } from './popup.js';
 import { t } from './i18n.js';
-import { reasoning_effort_types, resolveReasoningEffort } from './reasoning-effort.js';
+import { reasoning_effort_types, resolveReasoningEffort, resolveVerbosity, verbosity_levels } from './reasoning-effort.js';
 import { ToolManager } from './tool-calling.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { COMETAPI_IGNORE_PATTERNS, IGNORE_SYMBOL, MEDIA_DISPLAY, MEDIA_TYPE } from './constants.js';
@@ -231,13 +231,6 @@ const openrouter_middleout_types = {
     AUTO: 'auto',
     ON: 'on',
     OFF: 'off',
-};
-
-export const verbosity_levels = {
-    auto: 'auto',
-    low: 'low',
-    medium: 'medium',
-    high: 'high',
 };
 
 export const tool_reasoning_modes = {
@@ -2574,13 +2567,10 @@ function getReasoningEffort(settings = null, model = null) {
  */
 function getVerbosity(settings = null) {
     settings = settings ?? oai_settings;
-
-    if (settings.verbosity === verbosity_levels.auto) {
-        return undefined;
-    }
-
-    // TODO: Adjust verbosity based on model capabilities
-    return settings.verbosity;
+    return resolveVerbosity({
+        chatCompletionSource: settings.chat_completion_source,
+        selectedVerbosity: settings.verbosity,
+    });
 }
 
 /**

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { reasoning_effort_types, resolveReasoningEffort } from '../../public/scripts/reasoning-effort.js';
+import { reasoning_effort_types, resolveReasoningEffort, resolveVerbosity, verbosity_levels } from '../../public/scripts/reasoning-effort.js';
 
 test('[reasoning-effort] openrouter preserves max literally', () => {
     const effort = resolveReasoningEffort({
@@ -45,4 +45,40 @@ test('[reasoning-effort] openrouter minimum without thoughts disables reasoning'
     });
 
     assert.equal(effort, 'none');
+});
+
+test('[verbosity] openrouter preserves xhigh literally', () => {
+    const verbosity = resolveVerbosity({
+        chatCompletionSource: 'openrouter',
+        selectedVerbosity: verbosity_levels.xhigh,
+    });
+
+    assert.equal(verbosity, 'xhigh');
+});
+
+test('[verbosity] claude preserves max literally', () => {
+    const verbosity = resolveVerbosity({
+        chatCompletionSource: 'claude',
+        selectedVerbosity: verbosity_levels.max,
+    });
+
+    assert.equal(verbosity, 'max');
+});
+
+test('[verbosity] non-claude providers degrade xhigh to high', () => {
+    const verbosity = resolveVerbosity({
+        chatCompletionSource: 'openai',
+        selectedVerbosity: verbosity_levels.xhigh,
+    });
+
+    assert.equal(verbosity, 'high');
+});
+
+test('[verbosity] auto omits verbosity', () => {
+    const verbosity = resolveVerbosity({
+        chatCompletionSource: 'openrouter',
+        selectedVerbosity: verbosity_levels.auto,
+    });
+
+    assert.equal(verbosity, undefined);
 });

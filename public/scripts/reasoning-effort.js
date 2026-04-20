@@ -8,6 +8,15 @@ export const reasoning_effort_types = {
     xhigh: 'xhigh',
 };
 
+export const verbosity_levels = {
+    auto: 'auto',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'xhigh',
+    max: 'max',
+};
+
 export function resolveReasoningEffort({
     chatCompletionSource,
     model,
@@ -36,4 +45,21 @@ export function resolveReasoningEffort({
         default:
             return selectedEffort;
     }
+}
+
+export function resolveVerbosity({
+    chatCompletionSource,
+    selectedVerbosity,
+}) {
+    if (selectedVerbosity === verbosity_levels.auto) {
+        return undefined;
+    }
+
+    if ([verbosity_levels.max, verbosity_levels.xhigh].includes(selectedVerbosity)) {
+        return ['openrouter', 'claude'].includes(chatCompletionSource)
+            ? selectedVerbosity
+            : verbosity_levels.high;
+    }
+
+    return selectedVerbosity;
 }
