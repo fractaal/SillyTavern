@@ -552,7 +552,7 @@ export function getTokenCount(str, padding = undefined) {
  * @deprecated Use counterWrapperOpenAIAsync instead.
  */
 function counterWrapperOpenAI(text) {
-    const message = { role: 'system', content: text };
+    const message = { content: text };
     return countTokensOpenAI(message, true);
 }
 
@@ -562,7 +562,7 @@ function counterWrapperOpenAI(text) {
  * @returns {Promise<number>} Token count.
  */
 function counterWrapperOpenAIAsync(text) {
-    const message = { role: 'system', content: text };
+    const message = { content: text };
     return countTokensOpenAIAsync(message, true);
 }
 
@@ -694,6 +694,11 @@ export function getTokenizerModel() {
         }
     }
 
+    if (oai_settings.chat_completion_source == chat_completion_sources.MINIMAX) {
+        // MiniMax uses a proprietary tokenizer; fall back to a coarse OpenAI estimation.
+        return 'gpt-3.5-turbo';
+    }
+
     if (oai_settings.chat_completion_source == chat_completion_sources.WORKERS_AI && oai_settings.workers_ai_model) {
         const model = oai_settings.workers_ai_model.toLowerCase();
 
@@ -796,7 +801,7 @@ export function countTokensOpenAI(messages, full = false) {
         messages = [messages];
     }
 
-    let token_count = -1;
+    let token_count = 0;
 
     for (const message of messages) {
         const model = getTokenizerModel();
@@ -846,7 +851,7 @@ export async function countTokensOpenAIAsync(messages, full = false) {
         messages = [messages];
     }
 
-    let token_count = -1;
+    let token_count = 0;
 
     for (const message of messages) {
         const model = getTokenizerModel();
