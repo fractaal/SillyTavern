@@ -1676,11 +1676,11 @@ export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort, model) {
         return null;
     }
 
-    if (/gemini-3-pro/.test(model)) {
+    if (/gemini-3[.\d]*-pro/.test(model)) {
         return getGemini3ProBudget();
     }
 
-    if (/gemini-3-flash/.test(model) ) {
+    if (/gemini-3[.\d]*-flash/.test(model)) {
         return getGemini3FlashBudget();
     }
 
@@ -1719,7 +1719,7 @@ export function embedOpenRouterMedia(messages, { audio = true, video = true } = 
 
         for (const contentPart of message.content) {
             if (video && contentPart?.type === 'video_url' && contentPart.video_url?.url?.startsWith('data:')) {
-                contentPart.type = 'input_video';
+                contentPart.type = 'video_url';
             }
 
             if (audio && contentPart?.type === 'audio_url' && contentPart.audio_url?.url?.startsWith('data:')) {
@@ -1805,7 +1805,9 @@ export function addOpenRouterSignatures(messages, model) {
             details.push(detail);
         };
         if (typeof message.signature === 'string') {
-            addDetail(message.signature);
+            if (enableThoughtSignatures) {
+                addDetail(message.signature);
+            }
             delete message.signature;
         }
         if (Array.isArray(message.tool_calls)) {
