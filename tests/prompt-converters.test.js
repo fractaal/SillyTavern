@@ -3,6 +3,9 @@ import { describe, test, expect, jest, beforeAll } from '@jest/globals';
 jest.unstable_mockModule('../src/util.js', () => ({
     getConfigValue: jest.fn((_key, defaultValue) => defaultValue),
     tryParse: (str) => { try { return JSON.parse(str); } catch { return undefined; } },
+    // prompt-converters.js imports chalk as `color` for cache-anchor diagnostics.
+    // The mock must provide it or the module fails to link.
+    color: { yellow: (str) => str },
 }));
 
 /** @type {import('../src/prompt-converters.js')} */
