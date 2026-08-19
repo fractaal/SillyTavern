@@ -118,7 +118,7 @@ const enableAdaptiveThinking = getConfigValue('claude.enableAdaptiveThinking', t
  * Cache for cacheable (writing) OpenRouter model IDs.
  * @type {string[]}
  */
-const openRouterCacheableModels = [];
+const openRouterCacheableModels = new Map();
 
 /**
  * Checks if an OpenRouter model supports prompt cache writing.
@@ -127,9 +127,23 @@ const openRouterCacheableModels = [];
  * @returns {Promise<boolean>} `true` if the model supports writing cache
  */
 async function isOpenRouterModelCacheable(modelId) {
-    if (openRouterCacheableModels.includes(modelId)) {
-        return true;
+    // Memoise BOTH outcomes. Only memoising positives meant a genuinely non-cacheable
+    // model re-downloaded the whole ~665KB model list on every single request.
+    if (openRouterCacheableModels.has(modelId)) {
+        return openRouterCacheableModels.get(modelId);
     }
+
+    // Fail OPEN on any lookup problem. This lookup is a blocking call to an unrelated
+    // metadata endpoint sitting in the generation request path; if it fails we must not
+    // silently drop cache_control and multiply the cost of the generation. Sending
+    // cache_control to a model that does not support caching is a no-op upstream (verified
+    // against OpenRouter: gemini-3.1-flash-image accepts it and simply reports cached: 0),
+    // so an optimistic answer is strictly cheaper than a false negative. Failures are not
+    // memoised, so the next request re-checks.
+    const failOpen = (reason) => {
+        console.warn(`OpenRouter cache support check failed for ${modelId} (${reason}); assuming cacheable.`);
+        return true;
+    };
 
     try {
         const response = await fetch(`${API_OPENROUTER}/models`, {
@@ -139,29 +153,26 @@ async function isOpenRouterModelCacheable(modelId) {
         });
 
         if (!response.ok) {
-            console.warn(`OpenRouter models API returned ${response.status}: ${response.statusText}`);
-            return false;
+            return failOpen(`HTTP ${response.status} ${response.statusText}`);
         }
 
         /** @type {any} */
         const data = await response.json();
 
         if (!Array.isArray(data?.data)) {
-            console.warn('OpenRouter API response format unexpected');
-            return false;
+            return failOpen('unexpected response format');
         }
 
         const model = data.data.find(m => m.id === modelId);
-        const supportsCache = model?.pricing?.input_cache_write != null;
-
-        if (supportsCache) {
-            openRouterCacheableModels.push(modelId);
+        if (!model) {
+            return failOpen('model not listed');
         }
 
+        const supportsCache = model?.pricing?.input_cache_write != null;
+        openRouterCacheableModels.set(modelId, supportsCache);
         return supportsCache;
     } catch (error) {
-        console.warn(`Failed to check OpenRouter cache support for ${modelId}:`, error.message);
-        return false;
+        return failOpen(error.message);
     }
 }
 
