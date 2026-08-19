@@ -386,6 +386,16 @@ gemini:
   # (e.g {{random}} macro or lorebooks not as in-chat injections).
   # Otherwise, you'll just waste money on cache misses.
   enableSystemPromptCache: false
+  # Caches the system prompt AND the chat history up to this depth (OpenRouter only).
+  # Counted in user messages from the end, matching claude.cachingAtDepth. -1 disables.
+  # OpenRouter honours only the last cache breakpoint for Gemini, and Gemini caches a
+  # prefix, so this single anchor already covers the system prompt -- when it is enabled
+  # it supersedes enableSystemPromptCache above.
+  cachingAtDepth: -1
+  # How many user turns the cache anchor holds still before jumping forward.
+  # The anchor is quantised because an anchor that moves every turn pays a fresh cache
+  # write every turn. Larger values write less often but leave a longer uncached tail.
+  anchorStepTurns: 4
   # https://ai.google.dev/gemini-api/docs/imagen#imagen-configuration
   image:
     # Leave empty to use the API-default value.

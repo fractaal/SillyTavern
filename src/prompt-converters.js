@@ -1490,6 +1490,96 @@ export function cachingSystemPromptForOpenRouter(messages, ttl = undefined) {
 }
 
 /**
+ * Append a single cache_control anchor for Gemini via OpenRouter.
+ *
+ * Gemini's caching differs from Anthropic's in two ways that drive this design:
+ *
+ *  - OpenRouter honours only the LAST cache_control breakpoint for Gemini. Extra
+ *    breakpoints are accepted but ignored, so exactly one anchor is useful.
+ *  - Gemini caches a prefix. That single anchor therefore covers the system prompt
+ *    AND every message above it, which is why there is no separate system-prompt
+ *    breakpoint here -- a depth anchor already subsumes it.
+ *
+ * The anchor is quantised so it holds still for several turns. This matters a lot:
+ * an anchor that moves every turn forces a fresh cache write every turn, whereas a
+ * quantised anchor writes once and is then read cheaply until it next jumps.
+ *
+ * When the conversation is too short to place a quantised anchor, we fall back to
+ * anchoring the system prompt so that early turns are cached too, rather than
+ * silently dropping back to Gemini's (unreliable) implicit caching.
+ *
+ * @param {object[]} messages Chat Completions-style messages. Mutated in place.
+ * @param {number} cachingAtDepth How many recent user messages to keep outside the
+ *   cached block. Mirrors the Claude option of the same name. Negative disables.
+ * @param {number} stepTurns How many user turns the anchor holds before jumping
+ *   forward. Must be >= 1.
+ * @returns {void}
+ */
+export function cachingAtDepthForOpenRouterGemini(messages, cachingAtDepth, stepTurns) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return;
+    }
+    if (!Number.isInteger(cachingAtDepth) || cachingAtDepth < 0) {
+        return;
+    }
+
+    const step = Number.isInteger(stepTurns) && stepTurns >= 1 ? stepTurns : 1;
+
+    const setCacheOnMessage = (msg) => {
+        if (!msg) {
+            return false;
+        }
+        if (typeof msg.content === 'string') {
+            msg.content = [{ type: 'text', text: msg.content }];
+        }
+        if (!Array.isArray(msg.content) || msg.content.length === 0) {
+            return false;
+        }
+        let idx = -1;
+        for (let i = msg.content.length - 1; i >= 0; i--) {
+            if (msg.content[i] && msg.content[i].type === 'text') {
+                idx = i;
+                break;
+            }
+        }
+        if (idx === -1) {
+            idx = msg.content.length - 1;
+        }
+        msg.content[idx].cache_control = { type: 'ephemeral' };
+        return true;
+    };
+
+    // Positions of every user message. The anchor always lands on one of these so
+    // that the cached block ends on a turn boundary.
+    const userIndexes = [];
+    for (let i = 0; i < messages.length; i++) {
+        if (messages[i]?.role === 'user') {
+            userIndexes.push(i);
+        }
+    }
+
+    // Deepest user turn we are allowed to anchor on, keeping `cachingAtDepth` recent
+    // user turns outside the cached block. Those recent turns are the ones most likely
+    // to be edited or swiped, and re-anchoring over them would waste a cache write.
+    const cacheableUserTurns = userIndexes.length - cachingAtDepth;
+
+    // Snap back to a step boundary so the anchor stays put between jumps.
+    const quantisedTurn = Math.floor(cacheableUserTurns / step) * step;
+    const anchorTurn = quantisedTurn - 1;
+
+    if (anchorTurn >= 0 && anchorTurn < userIndexes.length) {
+        if (setCacheOnMessage(messages[userIndexes[anchorTurn]])) {
+            return;
+        }
+    }
+
+    // Conversation too short for a quantised anchor: cache the system prompt so the
+    // opening turns still get a deterministic cache instead of implicit best-effort.
+    cachingSystemPromptForOpenRouter(messages);
+}
+
+
+/**
  * Calculate the Claude budget tokens for a given reasoning effort.
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort

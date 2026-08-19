@@ -42,6 +42,7 @@ import {
     convertAI21Messages,
     convertXAIMessages,
     cachingAtDepthForOpenRouterClaude,
+    cachingAtDepthForOpenRouterGemini,
     cachingAtDepthForClaude,
     getPromptNames,
     calculateClaudeBudgetTokens,
@@ -2337,6 +2338,11 @@ router.post('/generate', async function (request, response) {
             const isGemini = /google\/gemini/.test(request.body.model);
             const isCacheableGemini = isGemini && await isOpenRouterModelCacheable(request.body.model);
             const enableGeminiSystemPromptCache = getConfigValue('gemini.enableSystemPromptCache', false, 'boolean');
+            const cachingAtDepthForGemini = (() => {
+                const value = getConfigValue('gemini.cachingAtDepth', -1, 'number');
+                return Number.isInteger(value) && value >= 0 ? value : -1;
+            })();
+            const geminiAnchorStepTurns = getConfigValue('gemini.anchorStepTurns', 4, 'number');
 
             const countCacheControls = (messages) => {
                 if (!Array.isArray(messages)) return 0;
@@ -2370,17 +2376,27 @@ router.post('/generate', async function (request, response) {
                     }
                 }
 
-                if (isCacheableGemini && enableGeminiSystemPromptCache) {
-                    cachingSystemPromptForOpenRouter(request.body.messages);
+                if (isCacheableGemini) {
+                    // Gemini honours only the last breakpoint and caches a prefix, so the
+                    // depth anchor already covers the system prompt. Only fall back to the
+                    // system-only breakpoint when depth anchoring is disabled.
+                    if (cachingAtDepthForGemini !== -1) {
+                        cachingAtDepthForOpenRouterGemini(request.body.messages, cachingAtDepthForGemini, geminiAnchorStepTurns);
+                    } else if (enableGeminiSystemPromptCache) {
+                        cachingSystemPromptForOpenRouter(request.body.messages);
+                    }
                 }
 
                 const cacheControlsAfter = countCacheControls(request.body.messages);
-                console.log('[OpenRouter Claude cache]', {
+                console.log('[OpenRouter cache]', {
                     model: request.body.model,
                     isClaude,
+                    isCacheableGemini,
                     cacheTTL: cacheTTLForClaude,
                     enableSystemPromptCache: enableSystemPromptCacheForClaude,
                     cachingAtDepth: cachingAtDepthForClaude,
+                    geminiCachingAtDepth: cachingAtDepthForGemini,
+                    geminiAnchorStepTurns,
                     cacheControlsBefore,
                     cacheControlsAfter,
                 });
