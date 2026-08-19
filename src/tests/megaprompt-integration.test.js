@@ -1,12 +1,8 @@
-import { test, beforeEach } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
 // Enable features via env so util.getConfigValue reads env instead of config.yaml
-process.env.SILLYTAVERN_CLAUDE_FIRSTANCHORCACHING_ENABLED = 'true';
-process.env.SILLYTAVERN_CLAUDE_FIRSTANCHORCACHING_TTLSECONDS = '3600';
-process.env.SILLYTAVERN_CLAUDE_FIRSTANCHORCACHING_ALLOWREWIND = 'true';
-
 process.env.SILLYTAVERN_CLAUDE_MEGAPROMPT_ENABLED = 'true';
 process.env.SILLYTAVERN_CLAUDE_MEGAPROMPT_TURNMULTIPLE = '4'; // small multiple for tests
 process.env.SILLYTAVERN_CLAUDE_MEGAPROMPT_MINLIVETAILTURNS = '2';
@@ -20,11 +16,6 @@ setConfigFilePath(path.resolve(process.cwd(), 'default/config.yaml'));
 const {
   applyMegapromptCompaction,
 } = await import('../prompt-converters.js');
-
-const {
-  applyFirstAnchorReconstruction,
-  FIRST_ANCHOR_STORE,
-} = await import('../first-anchor-cache.js');
 
 const msg = (role, content) => ({ role, content });
 const U = (t) => msg('user', t);
@@ -41,17 +32,9 @@ const getSealedText = (messages) => {
   return Array.isArray(m0.content) ? (m0.content?.[0]?.text ?? '') : (m0.content ?? '');
 };
 
-beforeEach(() => {
-  // Reset FirstAnchor global store between tests to avoid cross-test bleed
-  FIRST_ANCHOR_STORE.length = 0;
-});
-
-// Mimic the server pipeline: FirstAnchor -> Megaprompt (preserving leading systems)
+// Mimic the server pipeline: Megaprompt compaction (preserving leading systems)
 const runPipeline = (fullMessages, { depth = 1, turnMultiple = 4, minTail = 2, ttl = '5m' } = {}) => {
   const req = { body: { model: 'anthropic/claude-sonnet-4.5', messages: fullMessages.map(m => ({ ...m })) } };
-
-  // FirstAnchor reconstruction (in-place on req.body.messages)
-  applyFirstAnchorReconstruction(req);
 
   // Split leading systems
   let leadingSystemCount = 0;
@@ -80,7 +63,7 @@ const runPipeline = (fullMessages, { depth = 1, turnMultiple = 4, minTail = 2, t
 // Ensures no UA turns are lost across consecutive runs near the live-tail boundary with a trailing system
 // Repro: messages get "eaten" near the edge if boundary math or reconstruction drops a UA turn.
 // Expectation: tail2 starts with tail1, and equals tail1 + newly appended UA turns.
-test('[integration][first-anchor+megaprompt] preserves tail continuity across consecutive runs with trailing system', () => {
+test('[integration][megaprompt] preserves tail continuity across consecutive runs with trailing system', () => {
   const sysLead = SYS('SYS');
   const sysTrail = SYS('<CRITICAL_REMINDERS_AND_DIRECTIVES> ...');
 
