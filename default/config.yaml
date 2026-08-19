@@ -395,6 +395,20 @@ gemini:
   # How many user turns the cache anchor holds still before jumping forward.
   # The anchor is quantised because an anchor that moves every turn pays a fresh cache
   # write every turn. Larger values write less often but leave a longer uncached tail.
+  #
+  # Tuning (measured against OpenRouter, gemini-3.1-pro):
+  #   cost/turn ~= P*0.1 + P*0.1875/N + t*(N-1)/2, for prefix P tokens and t tokens per turn.
+  #   That is minimised at N = sqrt(2*P*0.1875/t), BUT Gemini's cache TTL is 5 minutes and
+  #   does not refresh on reads, so one write is only ever amortised over
+  #   floor(5min / your turn cadence) + 1 turns. Hence:
+  #
+  #       best N = min( sqrt(2*P*0.1875/t) , floor(5 / cadence_minutes) + 1 )
+  #
+  #   The curve is flat near the optimum: 4 is within ~1 percentage point of best for
+  #   prefixes from 32k to 200k at cadences from 30s to 6min. Only raise it if your turns
+  #   are fast (<1 min); lower it to 2 if your individual turns are very long (>2k tokens).
+  #   Do not set it high on a hunch -- a large step with long turns can cost MORE than not
+  #   caching at all, because the uncached tail outgrows the write it saves.
   anchorStepTurns: 4
   # https://ai.google.dev/gemini-api/docs/imagen#imagen-configuration
   image:
